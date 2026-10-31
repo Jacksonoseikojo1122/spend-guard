@@ -36,9 +36,11 @@ OWNER_KEYS=choose-a-long-random-owner-key npm start   # http://localhost:8790, S
 Create an agent (its key is shown once) and give it a policy:
 
 ```bash
-curl -X POST localhost:8790/v1/agents -H "authorization: Bearer $OWNER_KEY" \n  -H "content-type: application/json" -d '{"name":"procurement-bot"}'
+curl -X POST localhost:8790/v1/agents -H "authorization: Bearer $OWNER_KEY" \
+  -H "content-type: application/json" -d '{"name":"procurement-bot"}'
 
-curl -X PUT localhost:8790/v1/agents/$AGENT_ID/policy -H "authorization: Bearer $OWNER_KEY" \n  -H "content-type: application/json" -d @examples/policy.json
+curl -X PUT localhost:8790/v1/agents/$AGENT_ID/policy -H "authorization: Bearer $OWNER_KEY" \
+  -H "content-type: application/json" -d @examples/policy.json
 ```
 
 Set `DATABASE_URL` to use Postgres instead of SQLite.
