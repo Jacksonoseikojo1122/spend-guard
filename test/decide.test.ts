@@ -5,10 +5,11 @@ import { PaymentRequestSchema, type PaymentRequest } from "../src/request.js";
 
 const base = {
   currency: "GHS",
+  timezone: "Africa/Accra",
   limits: { per_payment_max: 50_000, per_day_max: 200_000, per_month_max: 1_500_000, payments_per_hour_max: 10 },
   recipients: { mode: "allow_list", list: ["supplier:kofi-hardware", "supplier:ama-printing"], new_recipient: "hold" },
   approval: { hold_above: 20_000, approvers: ["+233534884648"], channel: "sms", expires_after_minutes: 30 },
-  hours: { timezone: "Africa/Accra", allow: "Mon-Sat 07:00-19:00", outside: "hold" },
+  hours: { allow: "Mon-Sat 07:00-19:00", outside: "hold" },
 };
 const policy = (overrides: object = {}): Policy => PolicySchema.parse({ ...base, ...overrides });
 const req = (overrides: Partial<PaymentRequest> = {}): PaymentRequest =>
@@ -45,7 +46,7 @@ describe("policy validation", () => {
   });
 
   it("rejects bad time zones and hour windows", () => {
-    expect(PolicySchema.safeParse({ ...base, hours: { ...base.hours, timezone: "Africa/Kumasi" } }).success).toBe(false);
+    expect(PolicySchema.safeParse({ ...base, timezone: "Africa/Kumasi" }).success).toBe(false);
     expect(PolicySchema.safeParse({ ...base, hours: { ...base.hours, allow: "weekdays 9 to 5" } }).success).toBe(false);
     expect(parseHours("Mon-Fri 19:00-07:00")).toBeUndefined(); // overnight
     expect(parseHours("Sat-Mon 09:00-17:00")).toBeUndefined(); // wraps the week
@@ -109,7 +110,7 @@ describe("decisions", () => {
 
   it("uses the policy's time zone, not UTC", () => {
     // 05:00 UTC is 08:00 in Nairobi, inside the window there but not in Accra.
-    const nairobi = policy({ currency: "KES", hours: { ...base.hours, timezone: "Africa/Nairobi" } });
+    const nairobi = policy({ currency: "KES", timezone: "Africa/Nairobi" });
     const early = new Date("2026-11-03T05:00:00Z");
     expect(run({ p: nairobi, r: req({ currency: "KES" }), now: early }).result).toBe("allow");
     expect(run({ now: early }).rule).toBe("outside_hours");

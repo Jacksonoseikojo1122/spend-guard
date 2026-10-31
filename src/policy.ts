@@ -44,6 +44,9 @@ const Outcome = z.enum(["hold", "deny"]);
 export const PolicySchema = z
   .object({
     currency: z.enum(CURRENCIES),
+    // One time zone for everything: what "today" and "this month" mean for the limits, and
+    // when the working-hours window applies.
+    timezone: z.string().refine(isTimeZone, "unknown IANA time zone"),
     limits: z
       .object({
         per_payment_max: minor,
@@ -70,7 +73,6 @@ export const PolicySchema = z
       .optional(),
     hours: z
       .object({
-        timezone: z.string().refine(isTimeZone, "unknown IANA time zone"),
         allow: z.string().refine((s) => parseHours(s) !== undefined, 'expected a window like "Mon-Sat 07:00-19:00"'),
         outside: Outcome.default("hold"),
       })

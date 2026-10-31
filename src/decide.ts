@@ -7,7 +7,7 @@ import type { PaymentRequest } from "./request.js";
 // decision names the rule that made it, with the numbers, so a person can see exactly why.
 
 export type Usage = {
-  /** Allowed plus held amounts today, in the policy's time zone (minor units). */
+  /** Allowed plus unexpired held amounts today, in the policy's time zone (minor units). */
   day: number;
   /** Allowed plus held amounts this calendar month, in the policy's time zone. */
   month: number;
@@ -90,10 +90,10 @@ export function decide({ policy, request, usage, now }: DecisionInput): Decision
   // 8. Time window.
   if (policy.hours) {
     const window = parseHours(policy.hours.allow)!; // validated when the policy was saved
-    const local = localTime(now, policy.hours.timezone);
+    const local = localTime(now, policy.timezone);
     const inside = window.days.includes(local.day) && local.minute >= window.startMinute && local.minute < window.endMinute;
     if (!inside) {
-      const d = outcome(policy.hours.outside, "outside_hours", `Payments are only automatic during ${policy.hours.allow} (${policy.hours.timezone}).`, {
+      const d = outcome(policy.hours.outside, "outside_hours", `Payments are only automatic during ${policy.hours.allow} (${policy.timezone}).`, {
         local_time: `${local.day} ${hhmm(local.minute)}`,
       });
       if (d) return d;

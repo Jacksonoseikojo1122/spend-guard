@@ -1,6 +1,6 @@
 # Spend Guard: design
 
-Status: design, nothing built yet. Written 31 Oct 2026.
+Status: steps 1 and 2 built (decision engine; API, storage and audit log). Written 31 Oct 2026.
 
 ## The problem
 
@@ -52,8 +52,8 @@ Every request, decision and result is written to an append-only log.
 
 ```json
 {
-  "agent": "procurement-bot",
   "currency": "GHS",
+  "timezone": "Africa/Accra",
   "limits": {
     "per_payment_max": 50000,
     "per_day_max": 200000,
@@ -71,7 +71,7 @@ Every request, decision and result is written to an append-only log.
     "channel": "sms",
     "expires_after_minutes": 30
   },
-  "hours": { "timezone": "Africa/Accra", "allow": "Mon-Sat 07:00-19:00", "outside": "hold" }
+  "hours": { "allow": "Mon-Sat 07:00-19:00", "outside": "hold" }
 }
 ```
 
@@ -126,7 +126,9 @@ Plus an **MCP server** with three tools: `request_payment`, `check_payment`, `ge
 - `approvals`: request_id, approver, action, at, channel.
 - `audit_log`: append-only; each row stores the previous row's hash, so editing history is detectable.
 
-Totals for limits are computed in one transaction with a row lock on the agent, so two parallel requests can't both squeeze under the daily limit.
+Totals for limits are computed and the request is inserted in one transaction that holds a single lock (`BEGIN IMMEDIATE` on SQLite, a transaction-scoped advisory lock on Postgres). Two parallel requests can't both squeeze under the daily limit, and the audit log keeps one unbroken order. Decisions are made one at a time, which is plenty for agent traffic; a per-agent lock is a later optimisation.
+
+"Today" and "this month" are stored on each request as `local_day` and `local_month`, worked out in the policy's time zone when the request is decided.
 
 ## Security
 
