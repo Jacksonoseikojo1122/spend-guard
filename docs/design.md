@@ -1,6 +1,6 @@
 # Spend Guard: design
 
-Status: steps 1 and 2 built (decision engine; API, storage and audit log). Written 31 Oct 2026.
+Status: steps 1 to 3 built (decision engine; API, storage and audit log; approvals). Written 31 Oct 2026.
 
 ## The problem
 
@@ -107,9 +107,12 @@ Each decision names the rule and the numbers, for example `{"result":"deny","rul
 | Method | Path | What it does |
 | --- | --- | --- |
 | POST | `/v1/payment-requests` | Agent asks to pay. Returns `allowed`, `held` or `denied` |
+| GET | `/v1/payment-requests` | List, filter by `status` and `agent_id` |
 | GET | `/v1/payment-requests/{id}` | Status, decision, the rule that decided, and the provider result |
-| POST | `/v1/payment-requests/{id}/approve` | Approver approves (signed link or dashboard) |
-| POST | `/v1/payment-requests/{id}/reject` | Approver rejects |
+| POST | `/v1/payment-requests/{id}/approve` | Owner approves a held request |
+| POST | `/v1/payment-requests/{id}/reject` | Owner rejects |
+| GET | `/approve/{token}` | Approver's page from their link. Shows the request, changes nothing |
+| POST | `/approve/{token}` | The page's Approve / Reject buttons |
 | GET | `/v1/agents/{agent}/usage` | Spent and held today and this month, against limits |
 | PUT | `/v1/agents/{agent}/policy` | New policy version (owner key only) |
 | POST | `/v1/agents/{agent}/revoke` | Stop the agent at once |
@@ -129,6 +132,15 @@ Plus an **MCP server** with three tools: `request_payment`, `check_payment`, `ge
 Totals for limits are computed and the request is inserted in one transaction that holds a single lock (`BEGIN IMMEDIATE` on SQLite, a transaction-scoped advisory lock on Postgres). Two parallel requests can't both squeeze under the daily limit, and the audit log keeps one unbroken order. Decisions are made one at a time, which is plenty for agent traffic; a per-agent lock is a later optimisation.
 
 "Today" and "this month" are stored on each request as `local_day` and `local_month`, worked out in the policy's time zone when the request is decided.
+
+## Approvals
+
+- When a request is held, each approver in the policy gets their own random link. Only a hash of the link's token is stored. Any one answer closes all the links for that request.
+- **Opening a link never approves.** SMS and chat apps fetch links to build previews, so the GET only shows the request; the Approve and Reject buttons POST.
+- A held request ends as `approved` or `rejected` (a person), `expired` (nobody answered before `expires_after_minutes`), or `cancelled` (the agent was revoked). A hold reads as expired the moment its time is up; a sweeper records it in the audit log every minute.
+- Approved requests count toward limits like allowed ones; rejected, expired and cancelled ones free the room they held.
+- Notices are sent after the decision is committed, never under the lock. A failed send leaves the hold in place; the owner can answer through the API.
+- Notices go to the console, or to a webhook signed with HMAC-SHA256 that you connect to any SMS or WhatsApp sender. A built-in SMS adapter will follow once it's written from the provider's own documentation.
 
 ## Security
 
@@ -152,9 +164,9 @@ TypeScript, Hono, Zod, Postgres (SQLite locally), Vitest, Docker. MCP server wit
 
 ## Build order (about 2 to 3 weeks)
 
-1. Policy schema, decision engine and its tests (no HTTP yet).
-2. HTTP API, idempotency, Postgres, audit log with hash chain.
-3. Holds and approvals: dashboard page first, then SMS (Arkesel or Hubtel) approval links.
+1. Policy schema, decision engine and its tests (no HTTP yet). (Done.)
+2. HTTP API, idempotency, Postgres, audit log with hash chain. (Done.)
+3. Holds and approvals: approval links and page, expiry, owner API, signed webhook notices. (Done.) A built-in SMS adapter comes later.
 4. MoMo One-API integration in sandbox mode, end to end.
 5. MCP server, plus an example with Claude: a procurement agent paying two suppliers, one payment held for approval.
 6. Docs, OpenAPI, llms.txt, demo screenshots, project page on jacksonkojoosei.com.

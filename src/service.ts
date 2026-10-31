@@ -2,12 +2,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendAudit, canonical, verifyAudit } from "./audit.js";
 import type { Db, Query, Row } from "./db.js";
 import { decide, type Decision, type Usage } from "./decide.js";
+import { formatMoney, type ApprovalNotice, type Notifier } from "./notify.js";
 import { PolicySchema, type Policy } from "./policy.js";
 import { PaymentRequestSchema } from "./request.js";
 
 export class ApiError extends Error {
   constructor(
-    readonly status: 400 | 401 | 403 | 404 | 409 | 422,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 410 | 422,
     readonly code: string,
     message: string,
   ) {
@@ -17,7 +18,13 @@ export class ApiError extends Error {
 
 export type Agent = { id: string; owner: string; name: string; created_at: string; revoked_at: string | null };
 
-export type Status = "allowed" | "held" | "denied";
+/**
+ * allowed, denied: decided by the policy. held: waiting for a person. From held a request
+ * becomes approved or rejected (by a person), expired (nobody answered in time) or cancelled
+ * (the agent was revoked). Only allowed, approved and unexpired held requests count toward limits.
+ */
+export type Status = "allowed" | "held" | "approved" | "rejected" | "expired" | "cancelled" | "denied";
+export const STATUSES: Status[] = ["allowed", "held", "approved", "rejected", "expired", "cancelled", "denied"];
 
 export type PaymentRequestView = {
   id: string;
@@ -31,8 +38,18 @@ export type PaymentRequestView = {
   decision: Decision;
   policy_version: number | null;
   approval?: { expires_at: string };
+  resolved?: { at: string; by: string };
   created_at: string;
 };
+
+export type GuardOptions = {
+  now?: () => Date;
+  notifier?: Notifier;
+  /** Where approvers open their links, e.g. https://guard.example.com. */
+  publicUrl?: string;
+};
+
+type PendingNotice = Omit<ApprovalNotice, "url"> & { token: string };
 
 export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("base64url")}`;
@@ -46,10 +63,18 @@ export function localDate(now: Date, timeZone: string): { day: string; month: st
 }
 
 export class Guard {
+  private now: () => Date;
+  private notifier?: Notifier;
+  private publicUrl: string;
+
   constructor(
     private db: Db,
-    private now: () => Date = () => new Date(),
-  ) {}
+    opts: GuardOptions = {},
+  ) {
+    this.now = opts.now ?? (() => new Date());
+    this.notifier = opts.notifier;
+    this.publicUrl = (opts.publicUrl ?? "").replace(/\/+$/, "");
+  }
 
   // --- Agents and policies (owner only) ------------------------------------------------
 
@@ -97,7 +122,15 @@ export class Guard {
     const at = this.now().toISOString();
     await this.db.tx(async (q) => {
       await q("UPDATE agents SET revoked_at = $1 WHERE id = $2", [at, agentId]);
-      await appendAudit(q, at, { actor: `owner:${owner}`, event: "agent.revoked", subject: agentId, data: {} });
+      // Anything still waiting for approval dies with the agent, so nobody approves a payment
+      // for an agent that has just been stopped.
+      const held = await q("SELECT id FROM payment_requests WHERE agent_id = $1 AND status = 'held'", [agentId]);
+      const ids = held.map((r) => String(r.id));
+      if (ids.length) {
+        await q("UPDATE payment_requests SET status = 'cancelled', resolved_at = $1, resolved_by = $2 WHERE agent_id = $3 AND status = 'held'", [at, `owner:${owner}`, agentId]);
+        await q(`UPDATE approval_tokens SET used_at = $1 WHERE used_at IS NULL AND request_id IN (${ids.map((_, i) => `$${i + 2}`).join(", ")})`, [at, ...ids]);
+      }
+      await appendAudit(q, at, { actor: `owner:${owner}`, event: "agent.revoked", subject: agentId, data: { cancelled_requests: ids } });
     });
     return { ...agent, revoked_at: at };
   }
@@ -111,7 +144,8 @@ export class Guard {
   async requestPayment(agent: Agent, idempotencyKey: string, rawBody: unknown): Promise<{ request: PaymentRequestView; replayed: boolean }> {
     const body = PaymentRequestSchema.parse(rawBody);
     const requestHash = sha256(canonical(body));
-    return this.db.tx(async (q) => {
+    const notices: PendingNotice[] = [];
+    const result = await this.db.tx(async (q) => {
       // Checked inside the lock, so a revoke that lands mid-run stops the very next request.
       const [fresh] = await q("SELECT revoked_at FROM agents WHERE id = $1", [agent.id]);
       if (!fresh || fresh.revoked_at) throw new ApiError(403, "agent_revoked", "This agent's key has been revoked.");
@@ -120,7 +154,7 @@ export class Guard {
       if (existing) {
         if (existing.request_hash !== requestHash)
           throw new ApiError(409, "idempotency_key_reused", "This Idempotency-Key was already used for a different payment request.");
-        return { request: toView(existing), replayed: true };
+        return { request: toView(existing, this.now().getTime()), replayed: true };
       }
 
       const now = this.now();
@@ -146,14 +180,118 @@ export class Guard {
         subject: row.id as string,
         data: { amount: body.amount, currency: body.currency, recipient: body.recipient, reference: body.reference, reason: body.reason ?? null, decision, policy_version: current?.version ?? null, usage },
       });
-      return { request: toView(row), replayed: false };
+      // One single-use link per approver. Only the hash is stored; the token goes out in the notice.
+      if (status === "held" && policy?.approval) {
+        const expiresAt = new Date(holdExpiresMs!);
+        for (const approver of policy.approval.approvers) {
+          const token = randomBytes(24).toString("base64url");
+          await q("INSERT INTO approval_tokens (token_hash, request_id, approver, expires_ms) VALUES ($1, $2, $3, $4)", [sha256(token), row.id, approver, holdExpiresMs]);
+          notices.push({
+            token,
+            approver,
+            channel: policy.approval.channel,
+            message: `Spend Guard: ${agent.name} wants to pay ${formatMoney(body.amount, body.currency)} to ${body.recipient} (${body.reference}). ${decision.message} Approve or reject before ${hhmmIn(expiresAt, policy.timezone)}:`,
+            request: { id: String(row.id), agent_name: agent.name, amount: body.amount, currency: body.currency, recipient: body.recipient, reference: body.reference, expires_at: expiresAt.toISOString() },
+          });
+        }
+      }
+      return { request: toView(row, now.getTime()), replayed: false };
     });
+    await this.sendNotices(notices);
+    return result;
+  }
+
+  private async sendNotices(notices: PendingNotice[]) {
+    if (!this.notifier) return;
+    for (const { token, ...n } of notices) {
+      const url = `${this.publicUrl}/approve/${token}`;
+      try {
+        await this.notifier.send({ ...n, message: `${n.message} ${url}`, url });
+      } catch (e) {
+        // The hold stands either way; the owner can approve through the API.
+        console.error(`approval notice to ${n.approver} failed:`, e instanceof Error ? e.message : e);
+      }
+    }
+  }
+
+  // --- Approvals -----------------------------------------------------------------------
+
+  /** What an approver sees when they open their link. Opening it changes nothing. */
+  async approvalPage(token: string): Promise<{ request: PaymentRequestView; approver: string; agent_name: string; usage: Usage; limits?: Policy["limits"]; usable: boolean }> {
+    const [t] = await this.db.query("SELECT request_id, approver, used_at FROM approval_tokens WHERE token_hash = $1", [sha256(token)]);
+    if (!t) throw new ApiError(404, "approval_link_not_found", "This approval link isn't valid.");
+    const [r] = await this.db.query("SELECT * FROM payment_requests WHERE id = $1", [t.request_id]);
+    const [a] = await this.db.query("SELECT name FROM agents WHERE id = $1", [r!.agent_id]);
+    const { usage, limits } = await this.usage(String(r!.agent_id));
+    const request = toView(r!, this.now().getTime());
+    return { request, approver: String(t.approver), agent_name: String(a?.name ?? ""), usage, limits, usable: !t.used_at && request.status === "held" };
+  }
+
+  /** Approve or reject through a link. Each link works once, and only while the hold is open. */
+  async resolveByToken(token: string, action: "approve" | "reject"): Promise<PaymentRequestView> {
+    const [t] = await this.db.query("SELECT request_id, approver, used_at FROM approval_tokens WHERE token_hash = $1", [sha256(token)]);
+    if (!t) throw new ApiError(404, "approval_link_not_found", "This approval link isn't valid.");
+    if (t.used_at) throw new ApiError(409, "approval_link_used", "This approval link has already been used.");
+    return this.resolve(String(t.request_id), action, `approver:${t.approver}`);
+  }
+
+  async resolveAsOwner(owner: string, requestId: string, action: "approve" | "reject"): Promise<PaymentRequestView> {
+    await this.getRequest(await this.ownerAgentIds(owner), requestId); // 404 unless it's this owner's
+    return this.resolve(requestId, action, `owner:${owner}`);
+  }
+
+  private async resolve(requestId: string, action: "approve" | "reject", actor: string): Promise<PaymentRequestView> {
+    const out = await this.db.tx(async (q) => {
+      const [r] = await q("SELECT * FROM payment_requests WHERE id = $1", [requestId]);
+      if (!r) throw new ApiError(404, "payment_request_not_found", "No payment request with that id.");
+      const now = this.now();
+      if (r.status !== "held") throw new ApiError(409, "not_held", `This request is ${r.status}, so it can't be approved or rejected.`);
+      if (Number(r.hold_expires_ms) <= now.getTime()) {
+        // Record the expiry now rather than leave it to the sweeper, then report it.
+        await expire(q, [r], now);
+        return { expired: true as const };
+      }
+      const status: Status = action === "approve" ? "approved" : "rejected";
+      const at = now.toISOString();
+      await q("UPDATE payment_requests SET status = $1, resolved_at = $2, resolved_by = $3 WHERE id = $4", [status, at, actor, requestId]);
+      await q("UPDATE approval_tokens SET used_at = $1 WHERE request_id = $2 AND used_at IS NULL", [at, requestId]);
+      await appendAudit(q, at, { actor, event: `payment_request.${status}`, subject: requestId, data: { amount: Number(r.amount), currency: String(r.currency), recipient: String(r.recipient) } });
+      const [updated] = await q("SELECT * FROM payment_requests WHERE id = $1", [requestId]);
+      return { view: toView(updated!, now.getTime()) };
+    });
+    if ("expired" in out) throw new ApiError(410, "hold_expired", "Nobody answered in time, so this request expired and can't be approved now.");
+    return out.view;
+  }
+
+  /** Marks every hold whose time ran out as expired. Run it every minute or so. */
+  async expireHolds(): Promise<number> {
+    return this.db.tx(async (q) => {
+      const now = this.now();
+      const rows = await q("SELECT id, amount FROM payment_requests WHERE status = 'held' AND hold_expires_ms <= $1", [now.getTime()]);
+      await expire(q, rows, now);
+      return rows.length;
+    });
+  }
+
+  async listRequests(agentIds: string[], filter: { status?: Status; agentId?: string; limit: number }): Promise<PaymentRequestView[]> {
+    const ids = filter.agentId ? agentIds.filter((a) => a === filter.agentId) : agentIds;
+    if (!ids.length) return [];
+    const params: unknown[] = [...ids];
+    let sql = `SELECT * FROM payment_requests WHERE agent_id IN (${ids.map((_, i) => `$${i + 1}`).join(", ")})`;
+    if (filter.status) {
+      params.push(filter.status);
+      sql += ` AND status = $${params.length}`;
+    }
+    params.push(filter.limit);
+    sql += ` ORDER BY created_ms DESC LIMIT $${params.length}`;
+    const nowMs = this.now().getTime();
+    return (await this.db.query(sql, params)).map((r) => toView(r, nowMs));
   }
 
   async getRequest(agentIds: string[], requestId: string): Promise<PaymentRequestView> {
     const [r] = await this.db.query("SELECT * FROM payment_requests WHERE id = $1", [requestId]);
     if (!r || !agentIds.includes(String(r.agent_id))) throw new ApiError(404, "payment_request_not_found", "No payment request with that id.");
-    return toView(r);
+    return toView(r, this.now().getTime());
   }
 
   async ownerAgentIds(owner: string): Promise<string[]> {
@@ -173,6 +311,19 @@ export class Guard {
   }
 }
 
+async function expire(q: Query, rows: Row[], now: Date) {
+  const at = now.toISOString();
+  for (const r of rows) {
+    await q("UPDATE payment_requests SET status = 'expired', resolved_at = $1, resolved_by = 'system' WHERE id = $2 AND status = 'held'", [at, r.id]);
+    await q("UPDATE approval_tokens SET used_at = $1 WHERE request_id = $2 AND used_at IS NULL", [at, r.id]);
+    await appendAudit(q, at, { actor: "system", event: "payment_request.expired", subject: String(r.id), data: { amount: Number(r.amount) } });
+  }
+}
+
+function hhmmIn(d: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(d);
+}
+
 async function latestPolicy(q: Query, agentId: string): Promise<{ version: number; policy: Policy } | undefined> {
   const [r] = await q("SELECT version, document FROM policies WHERE agent_id = $1 ORDER BY version DESC LIMIT 1", [agentId]);
   // Stored policies were validated on the way in; parsing again applies defaults the same way.
@@ -180,11 +331,11 @@ async function latestPolicy(q: Query, agentId: string): Promise<{ version: numbe
 }
 
 /**
- * Totals that count toward the limits: allowed requests, plus held ones that haven't expired.
- * An expired hold can never be approved, so it stops reserving room.
+ * Totals that count toward the limits: allowed and approved requests, plus held ones that
+ * haven't expired. An expired hold can never be approved, so it stops reserving room.
  */
 async function usageFor(q: Query, agentId: string, day: string, month: string, nowMs: number): Promise<Usage> {
-  const counted = `(status = 'allowed' OR (status = 'held' AND hold_expires_ms > $3))`;
+  const counted = `(status IN ('allowed', 'approved') OR (status = 'held' AND hold_expires_ms > $3))`;
   const [d] = await q(`SELECT COALESCE(SUM(amount), 0) AS total FROM payment_requests WHERE agent_id = $1 AND local_day = $2 AND ${counted}`, [agentId, day, nowMs]);
   const [m] = await q(`SELECT COALESCE(SUM(amount), 0) AS total FROM payment_requests WHERE agent_id = $1 AND local_month = $2 AND ${counted}`, [agentId, month, nowMs]);
   const [h] = await q(`SELECT COUNT(*) AS n FROM payment_requests WHERE agent_id = $1 AND created_ms > $2 AND ${counted}`, [agentId, nowMs - 3_600_000, nowMs]);
@@ -195,16 +346,19 @@ const toAgent = (r: Row): Agent => ({
   id: String(r.id), owner: String(r.owner), name: String(r.name), created_at: String(r.created_at), revoked_at: r.revoked_at ? String(r.revoked_at) : null,
 });
 
-function toView(r: Row): PaymentRequestView {
+/** A hold whose time has run out reads as expired even before the sweeper has marked it. */
+function toView(r: Row, nowMs: number): PaymentRequestView {
+  const timedOut = r.status === "held" && r.hold_expires_ms != null && Number(r.hold_expires_ms) <= nowMs;
   const v: PaymentRequestView = {
-    id: String(r.id), agent_id: String(r.agent_id), status: r.status as Status,
+    id: String(r.id), agent_id: String(r.agent_id), status: timedOut ? "expired" : (r.status as Status),
     amount: Number(r.amount), currency: String(r.currency), recipient: String(r.recipient), reference: String(r.reference),
     reason: r.reason == null ? null : String(r.reason),
     decision: JSON.parse(String(r.decision)) as Decision,
     policy_version: r.policy_version == null ? null : Number(r.policy_version),
     created_at: String(r.created_at),
   };
-  if (r.status === "held" && r.hold_expires_ms != null) v.approval = { expires_at: new Date(Number(r.hold_expires_ms)).toISOString() };
+  if (r.hold_expires_ms != null) v.approval = { expires_at: new Date(Number(r.hold_expires_ms)).toISOString() };
+  if (r.resolved_at) v.resolved = { at: String(r.resolved_at), by: String(r.resolved_by) };
   return v;
 }
 

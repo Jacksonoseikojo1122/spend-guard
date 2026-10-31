@@ -34,7 +34,7 @@ describe.each(backends)("API on %s", (_name, makeDb) => {
   async function setup() {
     db = await makeDb();
     let now = new Date("2026-11-03T10:00:00Z"); // a Tuesday morning in Accra (UTC+0)
-    const guard = new Guard(db, () => now);
+    const guard = new Guard(db, { now: () => now });
     const app = createApp({ guard, ownerKeys: [OWNER_KEY, OTHER_OWNER_KEY] });
     const call = async (method: string, path: string, key: string, body?: unknown, headers: Record<string, string> = {}) => {
       const res = await app.request(path, {
