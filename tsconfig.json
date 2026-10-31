@@ -12,6 +12,7 @@
     "rootDir": "."
   },
   "include": [
+    "vitest.config.ts",
     "src",
     "test",
     
