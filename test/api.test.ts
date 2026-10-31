@@ -45,6 +45,8 @@ describe.each(backends)("API on %s", (_name, makeDb) => {
       return { status: res.status, headers: res.headers, json: (await res.json()) as any };
     };
     const newAgent = async (p: object | null = policy(), ownerKey = OWNER_KEY) => {
+      for (const id of ["supplier:kofi", "supplier:ama", "0241234567"])
+        await call("PUT", `/v1/recipients/${id}`, ownerKey, { name: `Payee ${id}`, phone: "0241234567", network: "mtn" });
       const { json } = await call("POST", "/v1/agents", ownerKey, { name: "procurement-bot" });
       if (p) expect((await call("PUT", `/v1/agents/${json.id}/policy`, ownerKey, p)).status).toBe(200);
       return { id: json.id as string, key: json.key as string };
@@ -62,6 +64,18 @@ describe.each(backends)("API on %s", (_name, makeDb) => {
     expect(r.json.key).toMatch(/^sg_agent_/);
     const rows = await db.query("SELECT key_hash FROM agents");
     expect(rows[0]!.key_hash).not.toBe(r.json.key); // stored hashed
+  });
+
+  it("only pays recipients the owner has put in the directory", async () => {
+    const { call, newAgent, pay } = await setup();
+    const agent = await newAgent();
+    const r = await pay(agent.key, { recipient: "0559999999" });
+    expect(r.status).toBe(422);
+    expect(r.json.error.code).toBe("unknown_recipient");
+    expect((await call("PUT", "/v1/recipients/attacker", agent.key, { name: "x", phone: "0559999999", network: "mtn" })).status).toBe(403);
+    expect((await call("PUT", "/v1/recipients/bad id!", OWNER_KEY, { name: "x", phone: "0559999999", network: "mtn" })).status).toBe(400);
+    expect((await call("PUT", "/v1/recipients/x", OWNER_KEY, { name: "x", phone: "not a phone", network: "mtn" })).status).toBe(400);
+    expect((await call("GET", "/v1/recipients", OWNER_KEY)).json.recipients.map((x: { id: string }) => x.id)).toEqual(["0241234567", "supplier:ama", "supplier:kofi"]);
   });
 
   it("refuses unknown keys, and agent keys on owner routes", async () => {
@@ -207,14 +221,14 @@ describe.each(backends)("API on %s", (_name, makeDb) => {
     await pay(agent.key, { amount: 10_000 });
     await pay(agent.key, { amount: 30_000 });
     const ok = (await call("GET", "/v1/audit/verify", OWNER_KEY)).json;
-    expect(ok).toMatchObject({ ok: true, entries: 4 }); // agent created, policy set, two decisions
+    expect(ok).toMatchObject({ ok: true, entries: 7 }); // three recipients, agent created, policy set, two decisions
     expect(ok.head).toMatch(/^[0-9a-f]{64}$/);
     expect((await call("GET", "/v1/audit/verify", agent.key)).status).toBe(403);
 
     // Someone with database access quietly changes the amount on the third entry.
-    const [third] = await db.query("SELECT data FROM audit_log WHERE seq = 3");
-    await db.query("UPDATE audit_log SET data = $1 WHERE seq = 3", [String(third!.data).replace("10000", "1000")]);
-    expect((await call("GET", "/v1/audit/verify", OWNER_KEY)).json).toMatchObject({ ok: false, broken_at: 3 });
+    const [decision] = await db.query("SELECT data FROM audit_log WHERE seq = 6");
+    await db.query("UPDATE audit_log SET data = $1 WHERE seq = 6", [String(decision!.data).replace("10000", "1000")]);
+    expect((await call("GET", "/v1/audit/verify", OWNER_KEY)).json).toMatchObject({ ok: false, broken_at: 6 });
   });
 
   it("stores the agent's reason and shows it back, without it affecting the decision", async () => {

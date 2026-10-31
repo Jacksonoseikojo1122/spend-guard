@@ -33,11 +33,17 @@ const SCHEMA = [
     status TEXT NOT NULL, decision TEXT NOT NULL, policy_version INTEGER,
     local_day TEXT NOT NULL, local_month TEXT NOT NULL, hold_expires_ms BIGINT,
     resolved_at TEXT, resolved_by TEXT,
+    payout_id TEXT, payout_status TEXT, payout_failure TEXT, payout_attempts BIGINT NOT NULL DEFAULT 0, payout_updated_ms BIGINT,
     created_at TEXT NOT NULL, created_ms BIGINT NOT NULL,
     UNIQUE (agent_id, idempotency_key))`,
   `CREATE INDEX IF NOT EXISTS payment_requests_day ON payment_requests (agent_id, local_day)`,
   `CREATE INDEX IF NOT EXISTS payment_requests_month ON payment_requests (agent_id, local_month)`,
   `CREATE INDEX IF NOT EXISTS payment_requests_status ON payment_requests (status, hold_expires_ms)`,
+  `CREATE INDEX IF NOT EXISTS payment_requests_payout ON payment_requests (payout_status, payout_updated_ms)`,
+  `CREATE INDEX IF NOT EXISTS payment_requests_payout_id ON payment_requests (payout_id)`,
+  `CREATE TABLE IF NOT EXISTS recipients (
+    owner TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, network TEXT NOT NULL,
+    updated_at TEXT NOT NULL, PRIMARY KEY (owner, id))`,
   `CREATE TABLE IF NOT EXISTS approval_tokens (
     token_hash TEXT PRIMARY KEY, request_id TEXT NOT NULL, approver TEXT NOT NULL,
     expires_ms BIGINT NOT NULL, used_at TEXT)`,
@@ -46,7 +52,7 @@ const SCHEMA = [
     data TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL)`,
 ];
 
-const BIGINT_COLUMNS = new Set(["amount", "hold_expires_ms", "created_ms", "seq", "total", "n", "version", "policy_version", "expires_ms"]);
+const BIGINT_COLUMNS = new Set(["amount", "hold_expires_ms", "created_ms", "seq", "total", "n", "version", "policy_version", "expires_ms", "payout_attempts", "payout_updated_ms"]);
 function normalise(rows: Row[]): Row[] {
   for (const r of rows) for (const k of Object.keys(r)) if (BIGINT_COLUMNS.has(k) && typeof r[k] === "string") r[k] = Number(r[k]);
   return rows;

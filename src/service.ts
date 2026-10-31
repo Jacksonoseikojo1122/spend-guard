@@ -2,9 +2,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendAudit, canonical, verifyAudit } from "./audit.js";
 import type { Db, Query, Row } from "./db.js";
 import { decide, type Decision, type Usage } from "./decide.js";
+import { canMoveTo, NETWORKS, PayoutRefused, validMomoSignature, type Payout, type PayoutClient, type PayoutStatus } from "./momo.js";
 import { formatMoney, type ApprovalNotice, type Notifier } from "./notify.js";
 import { PolicySchema, type Policy } from "./policy.js";
 import { PaymentRequestSchema } from "./request.js";
+import { z } from "zod";
 
 export class ApiError extends Error {
   constructor(
@@ -39,14 +41,28 @@ export type PaymentRequestView = {
   policy_version: number | null;
   approval?: { expires_at: string };
   resolved?: { at: string; by: string };
+  /** Present once the request is allowed or approved and payouts are switched on. */
+  payout?: { id: string | null; status: PayoutStatus | "queued"; failure: { code: string; message: string } | null };
   created_at: string;
 };
+
+export type Recipient = { id: string; name: string; phone: string; network: (typeof NETWORKS)[number] };
+export const RecipientSchema = z
+  .object({
+    name: z.string().min(1).max(100),
+    phone: z.string().regex(/^\+?[\d\s-]{9,20}$/, "a phone number like 024 123 4567 or +233241234567"),
+    network: z.enum(NETWORKS),
+  })
+  .strict();
+const RECIPIENT_ID = /^[A-Za-z0-9:_.+-]{1,100}$/;
 
 export type GuardOptions = {
   now?: () => Date;
   notifier?: Notifier;
   /** Where approvers open their links, e.g. https://guard.example.com. */
   publicUrl?: string;
+  /** MoMo One-API. Without it, allowed and approved requests are only recorded. */
+  payouts?: { client: PayoutClient; webhookSecret?: string };
 };
 
 type PendingNotice = Omit<ApprovalNotice, "url"> & { token: string };
@@ -66,6 +82,7 @@ export class Guard {
   private now: () => Date;
   private notifier?: Notifier;
   private publicUrl: string;
+  private payouts?: GuardOptions["payouts"];
 
   constructor(
     private db: Db,
@@ -74,6 +91,29 @@ export class Guard {
     this.now = opts.now ?? (() => new Date());
     this.notifier = opts.notifier;
     this.publicUrl = (opts.publicUrl ?? "").replace(/\/+$/, "");
+    this.payouts = opts.payouts;
+  }
+
+  // --- Recipients (owner only) ---------------------------------------------------------
+  // Agents name a recipient; only the owner says which phone number that name pays. An agent
+  // therefore can't invent a destination for money, only pick from the owner's directory.
+
+  async setRecipient(owner: string, recipientId: string, body: unknown): Promise<Recipient> {
+    if (!RECIPIENT_ID.test(recipientId)) throw new ApiError(400, "invalid_recipient_id", "Recipient ids use letters, digits and : _ . + - (up to 100).");
+    const r = RecipientSchema.parse(body);
+    const phone = r.phone.replace(/[\s-]/g, "");
+    const at = this.now().toISOString();
+    await this.db.tx(async (q) => {
+      await q("DELETE FROM recipients WHERE owner = $1 AND id = $2", [owner, recipientId]);
+      await q("INSERT INTO recipients (owner, id, name, phone, network, updated_at) VALUES ($1, $2, $3, $4, $5, $6)", [owner, recipientId, r.name, phone, r.network, at]);
+      await appendAudit(q, at, { actor: `owner:${owner}`, event: "recipient.set", subject: recipientId, data: { name: r.name, phone, network: r.network } });
+    });
+    return { id: recipientId, name: r.name, phone, network: r.network };
+  }
+
+  async listRecipients(owner: string): Promise<Recipient[]> {
+    const rows = await this.db.query("SELECT id, name, phone, network FROM recipients WHERE owner = $1 ORDER BY id", [owner]);
+    return rows.map((r) => ({ id: String(r.id), name: String(r.name), phone: String(r.phone), network: r.network as Recipient["network"] }));
   }
 
   // --- Agents and policies (owner only) ------------------------------------------------
@@ -157,6 +197,9 @@ export class Guard {
         return { request: toView(existing, this.now().getTime()), replayed: true };
       }
 
+      const [known] = await q("SELECT id FROM recipients WHERE owner = $1 AND id = $2", [agent.owner, body.recipient]);
+      if (!known) throw new ApiError(422, "unknown_recipient", `"${body.recipient}" isn't in the owner's recipient directory. The owner has to add it before anyone can pay it.`);
+
       const now = this.now();
       const current = await latestPolicy(q, agent.id);
       const policy = current?.policy;
@@ -171,6 +214,8 @@ export class Guard {
         amount: body.amount, currency: body.currency, recipient: body.recipient, reference: body.reference, reason: body.reason ?? null,
         status, decision: JSON.stringify(decision), policy_version: current?.version ?? null,
         local_day: day, local_month: month, hold_expires_ms: holdExpiresMs, created_at: now.toISOString(), created_ms: now.getTime(),
+        // Queued inside the same transaction as the decision, so a crash before sending can't lose it.
+        payout_status: status === "allowed" && this.payouts ? "queued" : null,
       };
       const cols = Object.keys(row);
       await q(`INSERT INTO payment_requests (${cols.join(", ")}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(", ")})`, Object.values(row));
@@ -198,6 +243,7 @@ export class Guard {
       return { request: toView(row, now.getTime()), replayed: false };
     });
     await this.sendNotices(notices);
+    if (!result.replayed && result.request.status === "allowed" && this.payouts) return { ...result, request: await this.dispatch(result.request.id) };
     return result;
   }
 
@@ -253,14 +299,115 @@ export class Guard {
       }
       const status: Status = action === "approve" ? "approved" : "rejected";
       const at = now.toISOString();
-      await q("UPDATE payment_requests SET status = $1, resolved_at = $2, resolved_by = $3 WHERE id = $4", [status, at, actor, requestId]);
+      const payoutStatus = status === "approved" && this.payouts ? "queued" : null;
+      await q("UPDATE payment_requests SET status = $1, resolved_at = $2, resolved_by = $3, payout_status = $4 WHERE id = $5", [status, at, actor, payoutStatus, requestId]);
       await q("UPDATE approval_tokens SET used_at = $1 WHERE request_id = $2 AND used_at IS NULL", [at, requestId]);
       await appendAudit(q, at, { actor, event: `payment_request.${status}`, subject: requestId, data: { amount: Number(r.amount), currency: String(r.currency), recipient: String(r.recipient) } });
       const [updated] = await q("SELECT * FROM payment_requests WHERE id = $1", [requestId]);
       return { view: toView(updated!, now.getTime()) };
     });
     if ("expired" in out) throw new ApiError(410, "hold_expired", "Nobody answered in time, so this request expired and can't be approved now.");
+    if (out.view.status === "approved" && this.payouts) return this.dispatch(requestId);
     return out.view;
+  }
+
+  // --- Payouts through MoMo One-API ---------------------------------------------------
+
+  /**
+   * Sends a queued payout. Safe to call more than once: the request id is the Idempotency-Key,
+   * so MoMo One-API returns the payout it already made instead of making another.
+   */
+  async dispatch(requestId: string): Promise<PaymentRequestView> {
+    const client = this.payouts?.client;
+    const [r] = await this.db.query("SELECT pr.*, a.owner FROM payment_requests pr JOIN agents a ON a.id = pr.agent_id WHERE pr.id = $1", [requestId]);
+    if (!client || !r || r.payout_status !== "queued") return this.view(requestId);
+    const [to] = await this.db.query("SELECT name, phone, network FROM recipients WHERE owner = $1 AND id = $2", [r.owner, r.recipient]);
+    let payout: Payout;
+    try {
+      if (!to) throw new PayoutRefused(`Recipient "${r.recipient}" was removed from the directory before the payout was sent.`);
+      payout = await client.createPayout({
+        idempotencyKey: requestId,
+        amount: Number(r.amount),
+        currency: String(r.currency),
+        phone: String(to.phone),
+        network: to.network as Recipient["network"],
+        name: String(to.name),
+        description: String(r.reference),
+        metadata: { spend_guard_request: requestId, spend_guard_agent: String(r.agent_id) },
+      });
+    } catch (e) {
+      if (e instanceof PayoutRefused) {
+        // Refused outright, so nothing was started: record it as failed and free the room.
+        await this.applyPayout(requestId, { id: r.payout_id ? String(r.payout_id) : "", status: "failed", failure: { code: "refused", message: e.message } });
+      } else {
+        // Timeout or network trouble: it may or may not have reached MoMo One-API. Leave it
+        // queued; the next sync sends it again with the same key, which can't pay twice.
+        await this.db.query("UPDATE payment_requests SET payout_attempts = payout_attempts + 1, payout_updated_ms = $1 WHERE id = $2", [this.now().getTime(), requestId]);
+        console.error(`payout for ${requestId} not confirmed yet:`, e instanceof Error ? e.message : e);
+      }
+      return this.view(requestId);
+    }
+    await this.applyPayout(requestId, payout);
+    return this.view(requestId);
+  }
+
+  /** Records a payout status if it moves the payout forward. Returns true if anything changed. */
+  private async applyPayout(requestId: string, payout: Payout): Promise<boolean> {
+    return this.db.tx(async (q) => {
+      const [r] = await q("SELECT payout_status, payout_id FROM payment_requests WHERE id = $1", [requestId]);
+      if (!r || r.payout_status == null) return false;
+      const from = r.payout_status as PayoutStatus | "queued";
+      if (from === payout.status || !canMoveTo(from, payout.status)) return false;
+      const now = this.now();
+      await q("UPDATE payment_requests SET payout_id = $1, payout_status = $2, payout_failure = $3, payout_attempts = payout_attempts + 1, payout_updated_ms = $4 WHERE id = $5", [
+        payout.id || r.payout_id, payout.status, payout.failure ? JSON.stringify(payout.failure) : null, now.getTime(), requestId,
+      ]);
+      await appendAudit(q, now.toISOString(), { actor: "momo-one-api", event: `payout.${payout.status}`, subject: requestId, data: { payout_id: payout.id || null, failure: payout.failure } });
+      return true;
+    });
+  }
+
+  /**
+   * A MoMo One-API webhook. The signature is checked, and then the payout's status is fetched
+   * from MoMo One-API rather than taken from the body: the webhook only says "go and look".
+   */
+  async handleMomoWebhook(rawBody: string, signature: string | undefined): Promise<{ updated: boolean }> {
+    const secret = this.payouts?.webhookSecret;
+    if (!this.payouts || !secret) throw new ApiError(404, "not_found", "Payouts aren't configured.");
+    if (!validMomoSignature(rawBody, signature, secret)) throw new ApiError(401, "bad_signature", "Webhook signature doesn't match.");
+    let event: { data?: { id?: unknown } };
+    try {
+      event = JSON.parse(rawBody);
+    } catch {
+      throw new ApiError(400, "invalid_json", "Body must be valid JSON.");
+    }
+    const payoutId = typeof event.data?.id === "string" ? event.data.id : undefined;
+    if (!payoutId) return { updated: false };
+    const [r] = await this.db.query("SELECT id FROM payment_requests WHERE payout_id = $1", [payoutId]);
+    if (!r) return { updated: false }; // not one of ours (MoMo One-API may serve other apps too)
+    return { updated: await this.applyPayout(String(r.id), await this.payouts.client.getPayout(payoutId)) };
+  }
+
+  /** Resends queued payouts and re-checks unfinished ones. Run it every minute or so. */
+  async syncPayouts(): Promise<{ sent: number; checked: number }> {
+    if (!this.payouts) return { sent: 0, checked: 0 };
+    const nowMs = this.now().getTime();
+    const queued = await this.db.query("SELECT id FROM payment_requests WHERE payout_status = 'queued' AND (payout_updated_ms IS NULL OR payout_updated_ms < $1) LIMIT 50", [nowMs - 30_000]);
+    for (const r of queued) await this.dispatch(String(r.id));
+    const open = await this.db.query("SELECT id, payout_id FROM payment_requests WHERE payout_status IN ('pending', 'action_required') AND payout_updated_ms < $1 LIMIT 50", [nowMs - 60_000]);
+    for (const r of open) {
+      try {
+        await this.applyPayout(String(r.id), await this.payouts.client.getPayout(String(r.payout_id)));
+      } catch (e) {
+        console.error(`checking payout ${r.payout_id} failed:`, e instanceof Error ? e.message : e);
+      }
+    }
+    return { sent: queued.length, checked: open.length };
+  }
+
+  private async view(requestId: string): Promise<PaymentRequestView> {
+    const [r] = await this.db.query("SELECT * FROM payment_requests WHERE id = $1", [requestId]);
+    return toView(r!, this.now().getTime());
   }
 
   /** Marks every hold whose time ran out as expired. Run it every minute or so. */
@@ -332,10 +479,11 @@ async function latestPolicy(q: Query, agentId: string): Promise<{ version: numbe
 
 /**
  * Totals that count toward the limits: allowed and approved requests, plus held ones that
- * haven't expired. An expired hold can never be approved, so it stops reserving room.
+ * haven't expired. An expired hold can never be approved, so it stops reserving room, and a
+ * payout that failed or was reversed moved no money, so it frees its room too.
  */
 async function usageFor(q: Query, agentId: string, day: string, month: string, nowMs: number): Promise<Usage> {
-  const counted = `(status IN ('allowed', 'approved') OR (status = 'held' AND hold_expires_ms > $3))`;
+  const counted = `((status IN ('allowed', 'approved') AND COALESCE(payout_status, '') NOT IN ('failed', 'reversed')) OR (status = 'held' AND hold_expires_ms > $3))`;
   const [d] = await q(`SELECT COALESCE(SUM(amount), 0) AS total FROM payment_requests WHERE agent_id = $1 AND local_day = $2 AND ${counted}`, [agentId, day, nowMs]);
   const [m] = await q(`SELECT COALESCE(SUM(amount), 0) AS total FROM payment_requests WHERE agent_id = $1 AND local_month = $2 AND ${counted}`, [agentId, month, nowMs]);
   const [h] = await q(`SELECT COUNT(*) AS n FROM payment_requests WHERE agent_id = $1 AND created_ms > $2 AND ${counted}`, [agentId, nowMs - 3_600_000, nowMs]);
@@ -359,6 +507,8 @@ function toView(r: Row, nowMs: number): PaymentRequestView {
   };
   if (r.hold_expires_ms != null) v.approval = { expires_at: new Date(Number(r.hold_expires_ms)).toISOString() };
   if (r.resolved_at) v.resolved = { at: String(r.resolved_at), by: String(r.resolved_by) };
+  if (r.payout_status != null)
+    v.payout = { id: r.payout_id ? String(r.payout_id) : null, status: r.payout_status as PayoutStatus | "queued", failure: r.payout_failure ? JSON.parse(String(r.payout_failure)) : null };
   return v;
 }
 

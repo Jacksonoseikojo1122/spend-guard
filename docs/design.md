@@ -1,6 +1,6 @@
 # Spend Guard: design
 
-Status: steps 1 to 3 built (decision engine; API, storage and audit log; approvals). Written 31 Oct 2026.
+Status: steps 1 to 4 built (decision engine; API, storage and audit log; approvals; payouts through MoMo One-API). Written 31 Oct 2026.
 
 ## The problem
 
@@ -116,7 +116,9 @@ Each decision names the rule and the numbers, for example `{"result":"deny","rul
 | GET | `/v1/agents/{agent}/usage` | Spent and held today and this month, against limits |
 | PUT | `/v1/agents/{agent}/policy` | New policy version (owner key only) |
 | POST | `/v1/agents/{agent}/revoke` | Stop the agent at once |
-| POST | `/v1/webhooks/momo` | Payment results from MoMo One-API |
+| PUT | `/v1/recipients/{id}` | Owner adds or changes a payee: name, phone, network |
+| GET | `/v1/recipients` | The owner's payee directory |
+| POST | `/webhooks/momo` | Payout results from MoMo One-API (signed) |
 
 Plus an **MCP server** with three tools: `request_payment`, `check_payment`, `get_my_limits`. The agent can see its own limits, so it can tell the user "this needs approval" rather than guessing.
 
@@ -141,6 +143,17 @@ Totals for limits are computed and the request is inserted in one transaction th
 - Approved requests count toward limits like allowed ones; rejected, expired and cancelled ones free the room they held.
 - Notices are sent after the decision is committed, never under the lock. A failed send leaves the hold in place; the owner can answer through the API.
 - Notices go to the console, or to a webhook signed with HMAC-SHA256 that you connect to any SMS or WhatsApp sender. A built-in SMS adapter will follow once it's written from the provider's own documentation.
+
+## Payouts
+
+- **Recipient directory.** The owner maps each payee id (like `supplier:kofi-hardware`) to a name, phone and network. A payment request must name a payee in the owner's directory, or it's refused with `422 unknown_recipient` and not stored. The agent picks who; only the owner decides which phone number that is.
+- When a request is allowed, or a held one approved, its payout is marked `queued` in the same transaction. After the commit it's sent to MoMo One-API's `POST /v1/payouts` with the request id as the `Idempotency-Key`.
+- If MoMo One-API refuses it outright (4xx), nothing was started: the payout is recorded as `failed` (`refused`).
+- If the call times out, it may or may not have arrived, so it stays `queued`. The once-a-minute sync sends it again with the same key, which returns the existing payout rather than making a second one.
+- Webhooks from MoMo One-API are checked against `X-Signature` (HMAC-SHA256 of the raw body). The body is then only used to find the payout: its status is fetched from `GET /v1/payments/{id}`.
+- Statuses only move forward: a late `pending` can't undo `succeeded`, and only `succeeded` can become `reversed`. Every change is written to the audit log.
+- `failed` and `reversed` payouts stop counting toward the limits. No money left.
+- The sync also re-checks payouts still `pending` after a minute, in case a webhook was lost.
 
 ## Security
 
@@ -167,7 +180,7 @@ TypeScript, Hono, Zod, Postgres (SQLite locally), Vitest, Docker. MCP server wit
 1. Policy schema, decision engine and its tests (no HTTP yet). (Done.)
 2. HTTP API, idempotency, Postgres, audit log with hash chain. (Done.)
 3. Holds and approvals: approval links and page, expiry, owner API, signed webhook notices. (Done.) A built-in SMS adapter comes later.
-4. MoMo One-API integration in sandbox mode, end to end.
+4. MoMo One-API integration in sandbox mode, end to end. (Done: recipient directory, payouts, webhooks, sync.)
 5. MCP server, plus an example with Claude: a procurement agent paying two suppliers, one payment held for approval.
 6. Docs, OpenAPI, llms.txt, demo screenshots, project page on jacksonkojoosei.com.
 

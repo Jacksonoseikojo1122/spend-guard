@@ -29,6 +29,9 @@ export function createApp({ guard, ownerKeys }: AppOptions) {
 
   app.get("/health", (c) => c.json({ ok: true }));
 
+  // --- MoMo One-API webhook (signed; no API key) --------------------------------------------
+  app.post("/webhooks/momo", async (c) => c.json(await guard.handleMomoWebhook(await c.req.text(), c.req.header("x-signature"))));
+
   // --- Approval links (no API key: the token in the link is the credential) ---------------
   // Opening the link only shows the request. Link previews in SMS and chat apps fetch links
   // automatically, so a GET must never approve anything; only the form's POST does.
@@ -91,6 +94,8 @@ export function createApp({ guard, ownerKeys }: AppOptions) {
   });
   app.put("/v1/agents/:id/policy", async (c) => c.json(await guard.setPolicy(owner(c), c.req.param("id"), await c.req.json())));
   app.post("/v1/agents/:id/revoke", async (c) => c.json(await guard.revoke(owner(c), c.req.param("id"))));
+  app.put("/v1/recipients/:id", async (c) => c.json(await guard.setRecipient(owner(c), c.req.param("id"), await c.req.json())));
+  app.get("/v1/recipients", async (c) => c.json({ recipients: await guard.listRecipients(owner(c)) }));
   app.post("/v1/payment-requests/:id/approve", async (c) => c.json(await guard.resolveAsOwner(owner(c), c.req.param("id"), "approve")));
   app.post("/v1/payment-requests/:id/reject", async (c) => c.json(await guard.resolveAsOwner(owner(c), c.req.param("id"), "reject")));
   app.get("/v1/audit/verify", async (c) => {

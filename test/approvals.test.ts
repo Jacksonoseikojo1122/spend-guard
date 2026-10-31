@@ -58,6 +58,7 @@ describe.each(backends)("approvals on %s", (_name, makeDb) => {
     };
     const form = (path: string, action: string) =>
       Promise.resolve(app.request(path, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: `action=${action}` })).then(async (r: Response) => ({ status: r.status, text: await r.text() }));
+    await call("PUT", "/v1/recipients/supplier:kofi", OWNER_KEY, { name: "Kofi Hardware", phone: "0241234567", network: "mtn" });
     const { json: agent } = await call("POST", "/v1/agents", OWNER_KEY, { name: "procurement-bot" });
     await call("PUT", `/v1/agents/${agent.id}/policy`, OWNER_KEY, policy());
     let n = 0;
@@ -174,6 +175,7 @@ describe.each(backends)("approvals on %s", (_name, makeDb) => {
   it("keeps the hold when a notice can't be sent", async () => {
     db = await makeDb();
     const guard = new Guard(db, { now: () => new Date("2026-11-03T10:00:00Z"), notifier: { send: async () => Promise.reject(new Error("SMS gateway down")) } });
+    await guard.setRecipient("o", "supplier:kofi", { name: "Kofi", phone: "0241234567", network: "mtn" });
     const { agent, key } = await guard.createAgent("o", "bot");
     await guard.setPolicy("o", agent.id, policy());
     const { request } = await guard.requestPayment(agent, "k1", { amount: 30_000, currency: "GHS", recipient: "supplier:kofi", reference: "x" });
@@ -185,7 +187,7 @@ describe.each(backends)("approvals on %s", (_name, makeDb) => {
     const { call, form, pay, sent, linkPath } = await setup();
     await pay();
     await form(linkPath(sent[0]!), "approve");
-    expect((await call("GET", "/v1/audit/verify", OWNER_KEY)).json).toMatchObject({ ok: true, entries: 4 });
+    expect((await call("GET", "/v1/audit/verify", OWNER_KEY)).json).toMatchObject({ ok: true, entries: 5 });
   });
 });
 

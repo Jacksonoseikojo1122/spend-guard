@@ -2,7 +2,7 @@
 
 Spending limits and human approval for AI agents that move money on mobile money.
 
-> **Status: in progress.** Built and tested: the policy format, the decision engine, the HTTP API with idempotency, SQLite and Postgres storage, the tamper-evident audit log, and approvals (links, expiry, owner API). Next: the MoMo One-API connection and the MCP server. Until those land, an allowed or approved request is recorded but no money moves. See the [design](docs/design.md).
+> **Status: in progress.** Built and tested: the policy format, the decision engine, the HTTP API with idempotency, SQLite and Postgres storage, the tamper-evident audit log, approvals, a recipient directory and payouts through MoMo One-API (run end to end against its sandbox, not yet against a real provider). Next: the MCP server. See the [design](docs/design.md).
 
 AI agents are starting to pay suppliers, refund customers and send mobile money. Usually the agent holds the provider's secret key and can send any amount to anyone. One prompt injection, bug or retry loop, and the money is gone, with no record of why.
 
@@ -17,7 +17,8 @@ Spend Guard sits between your agents and your payment provider. The agent never 
 ## What you get (planned for v0.1)
 
 - **Keys per agent, with limits attached:** per payment, per day, per month and per hour. Revoke one agent without touching anything else.
-- **Recipient allow lists.** New recipients can be held for approval instead of paid.
+- **A recipient directory the agent can't change.** The owner sets each payee's name, phone and network. An agent can only name a payee from the directory, so it can't invent where money goes. Each agent also has its own allow list; payees outside it can be held for approval instead of paid.
+- **Payouts through MoMo One-API.** Allowed and approved requests are paid out using the request id as the idempotency key, so a retry or crash can't pay twice. Payout results come back by signed webhook, and Spend Guard confirms each one with MoMo One-API before believing it. Failed and reversed payouts free their room in the limits.
 - **Approval above an amount you choose.** Each approver gets a single-use link by SMS, WhatsApp or webhook. Opening the link changes nothing (chat apps preview links automatically); only pressing Approve or Reject does. Unanswered holds expire, so an agent can't wait them out, and revoking an agent cancels its pending holds.
 - **Deny by default.** No policy means no payment.
 - **The agent's words don't count.** Amount, currency and recipient are typed and validated. The agent's "reason" is shown to the approver but never used to decide.
@@ -33,9 +34,12 @@ cd spend-guard && npm install
 OWNER_KEYS=choose-a-long-random-owner-key npm start   # http://localhost:8790, SQLite by default
 ```
 
-Create an agent (its key is shown once) and give it a policy:
+Add a payee to your directory, create an agent (its key is shown once) and give it a policy:
 
 ```bash
+curl -X PUT localhost:8790/v1/recipients/supplier:kofi-hardware -H "authorization: Bearer $OWNER_KEY" \
+  -H "content-type: application/json" -d '{"name":"Kofi Hardware","phone":"024 123 4567","network":"mtn"}'
+
 curl -X POST localhost:8790/v1/agents -H "authorization: Bearer $OWNER_KEY" \
   -H "content-type: application/json" -d '{"name":"procurement-bot"}'
 
@@ -100,6 +104,23 @@ and the link opens this page. The agent's note is shown as its own unchecked wor
 | `APPROVAL_WEBHOOK_URL`, `APPROVAL_WEBHOOK_SECRET` | Where approval notices are POSTed, signed as `X-SpendGuard-Signature: sha256=<HMAC>`. Connect it to any SMS or WhatsApp sender. Without it, notices are printed to the console. |
 
 Owners can also answer over the API: `GET /v1/payment-requests?status=held`, then `POST /v1/payment-requests/{id}/approve` or `/reject`. Agent keys can't approve anything.
+
+## Payouts
+
+| Setting | What it does |
+| --- | --- |
+| `MOMO_URL`, `MOMO_API_KEY` | Your [MoMo One-API](https://github.com/Jacksonoseikojo1122/momo-one-api) and its key. Without them, decisions are recorded but nothing is paid out. |
+| `MOMO_WEBHOOK_SECRET` | The `WEBHOOK_SECRET` you gave MoMo One-API. Point its `WEBHOOK_URL` at `https://<spend-guard>/webhooks/momo`. Without it, results are picked up by a check every minute. |
+
+A real run against MoMo One-API's sandbox (31 Oct 2026), with both services on one laptop:
+
+| Request | Decision | Payout |
+| --- | --- | --- |
+| GH₵ 120 to Kofi Hardware, Invoice 88 | allowed | `succeeded` |
+| GH₵ 50 to a sandbox wallet with no money | allowed | `failed`, `insufficient_funds`; its GH₵ 50 was released from the daily total |
+| GH₵ 450 to Kofi Hardware, Invoice 90 | held, then approved by the owner | `succeeded` |
+
+Every step, from the decision to the approval to each payout result, is in the audit log, which verified cleanly (14 entries).
 
 ## Docs
 
