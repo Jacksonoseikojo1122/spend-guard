@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { postgresDb, sqliteDb } from "./db.js";
 import { momoClient } from "./momo.js";
@@ -36,7 +39,9 @@ if (env.MOMO_URL) {
 const port = Number(env.PORT ?? 8790);
 const db = env.DATABASE_URL ? await postgresDb(env.DATABASE_URL) : sqliteDb(env.SQLITE_PATH ?? "spend-guard.db");
 const guard = new Guard(db, { notifier, publicUrl: env.PUBLIC_URL ?? `http://localhost:${port}`, payouts });
-serve({ fetch: createApp({ guard, ownerKeys }).fetch, port });
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const read = (f: string) => (existsSync(join(root, f)) ? readFileSync(join(root, f), "utf8") : undefined);
+serve({ fetch: createApp({ guard, ownerKeys, files: { openapi: read("openapi.yaml"), llms: read("llms.txt") } }).fetch, port });
 console.log(`Spend Guard listening on http://localhost:${port} (${env.DATABASE_URL ? "Postgres" : "SQLite"})`);
 
 // Holds already stop counting and can't be approved once their time is up; this just records

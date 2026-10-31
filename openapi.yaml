@@ -1,0 +1,382 @@
+openapi: 3.1.0
+info:
+  title: Spend Guard
+  version: 0.1.0
+  summary: Spending limits and human approval for AI agents that move money on mobile money.
+  description: |
+    Agents never hold payment keys. They ask Spend Guard to pay; each request is checked against the
+    agent's policy and is allowed (paid out through MoMo One-API), held (a person approves or rejects
+    it) or denied (with the rule that stopped it). It never holds funds.
+
+    Two kinds of key: owner keys (from OWNER_KEYS) manage agents, policies, recipients and approvals;
+    agent keys (sg_agent_..., issued by POST /v1/agents) can only ask to pay and read their own data.
+    Money is integer minor units (12000 = GHS 120.00).
+  contact: { name: Jackson Kojo Osei, url: "https://jacksonkojoosei.com/projects/spend-guard" }
+  license: { name: MIT, identifier: MIT }
+servers:
+  - url: http://localhost:8790
+security:
+  - bearer: []
+tags:
+  - { name: Owner, description: Owner key only }
+  - { name: Agent, description: Agent key only }
+  - { name: Shared, description: "The owner, or the agent the data belongs to" }
+  - { name: Public, description: No API key; protected another way }
+paths:
+  /health:
+    get:
+      tags: [Public]
+      summary: Liveness check
+      security: []
+      responses: { "200": { description: OK, content: { application/json: { example: { ok: true } } } } }
+
+  /v1/agents:
+    post:
+      tags: [Owner]
+      summary: Create an agent. Its key is returned once and never again.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, additionalProperties: false, required: [name], properties: { name: { type: string, maxLength: 100 } } }, example: { name: procurement-bot } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/Agent" }, { type: object, properties: { key: { type: string, example: "sg_agent_..." }, note: { type: string } } }] } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/agents/{id}/policy:
+    parameters: [{ $ref: "#/components/parameters/AgentId" }]
+    put:
+      tags: [Owner]
+      summary: Set a new policy version. Policies are never edited in place.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Policy" } } }
+      responses:
+        "200": { description: Saved, content: { application/json: { schema: { $ref: "#/components/schemas/PolicyVersion" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [Shared]
+      summary: The agent's current policy
+      responses:
+        "200": { description: Current policy, content: { application/json: { schema: { $ref: "#/components/schemas/PolicyVersion" } } } }
+        "404": { description: "No such agent, or no_policy (it can't spend anything)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /v1/agents/{id}/revoke:
+    parameters: [{ $ref: "#/components/parameters/AgentId" }]
+    post:
+      tags: [Owner]
+      summary: Stop the agent at once. Its pending holds are cancelled.
+      responses:
+        "200": { description: Revoked, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/agents/{id}/usage:
+    parameters: [{ $ref: "#/components/parameters/AgentId" }]
+    get:
+      tags: [Shared]
+      summary: What counts toward the limits today, this month and in the last hour
+      description: Allowed and approved requests (unless their payout failed or was reversed), plus held requests that haven't expired.
+      responses:
+        "200":
+          description: Usage
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usage: { $ref: "#/components/schemas/Usage" }
+                  limits: { $ref: "#/components/schemas/Limits" }
+                  day: { type: string, example: "2026-11-03" }
+                  month: { type: string, example: "2026-11" }
+                  timezone: { type: string, example: Africa/Accra }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/recipients:
+    get:
+      tags: [Owner]
+      summary: The owner's payee directory
+      responses:
+        "200": { description: Recipients, content: { application/json: { schema: { type: object, properties: { recipients: { type: array, items: { $ref: "#/components/schemas/Recipient" } } } } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/recipients/{id}:
+    put:
+      tags: [Owner]
+      summary: Add or change a payee. Agents can only pay ids in this directory.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9:_.+-]{1,100}$" }, example: "supplier:kofi-hardware" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecipientInput" }
+            example: { name: Kofi Hardware, phone: "024 123 4567", network: mtn }
+      responses:
+        "200": { description: Saved, content: { application/json: { schema: { $ref: "#/components/schemas/Recipient" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/me:
+    get:
+      tags: [Agent]
+      summary: Which agent this key belongs to
+      responses:
+        "200": { description: The agent, content: { application/json: { schema: { type: object, properties: { id: { type: string }, name: { type: string }, created_at: { type: string, format: date-time } } } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/payment-requests:
+    post:
+      tags: [Agent]
+      summary: Ask to pay. Decided against the agent's policy in one locked step.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentRequestInput" }
+            example: { amount: 12000, currency: GHS, recipient: "supplier:kofi-hardware", reference: Invoice 88, reason: Paying for roofing sheets delivered Tuesday }
+      responses:
+        "201": { description: "Decided: allowed, held or denied (a denial is a normal answer, not an error)", content: { application/json: { schema: { $ref: "#/components/schemas/PaymentRequest" } } } }
+        "200": { description: "Replayed: same Idempotency-Key and body (header Idempotent-Replayed: true)", content: { application/json: { schema: { $ref: "#/components/schemas/PaymentRequest" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Owner key used, or the agent was revoked (agent_revoked)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Idempotency-Key already used with a different body (idempotency_key_reused), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: The recipient isn't in the owner's directory (unknown_recipient). Nothing is stored., content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    get:
+      tags: [Shared]
+      summary: List payment requests, newest first
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: agent_id, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200": { description: Requests, content: { application/json: { schema: { type: object, properties: { payment_requests: { type: array, items: { $ref: "#/components/schemas/PaymentRequest" } } } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/payment-requests/{id}:
+    parameters: [{ $ref: "#/components/parameters/RequestId" }]
+    get:
+      tags: [Shared]
+      summary: One payment request, with its decision, approval and payout
+      responses:
+        "200": { description: The request, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentRequest" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/payment-requests/{id}/approve:
+    parameters: [{ $ref: "#/components/parameters/RequestId" }]
+    post:
+      tags: [Owner]
+      summary: Approve a held request. With payouts on, it's paid out straight away.
+      responses:
+        "200": { description: Approved, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentRequest" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Not held any more (not_held) }
+        "410": { description: The hold expired before anyone answered (hold_expired) }
+
+  /v1/payment-requests/{id}/reject:
+    parameters: [{ $ref: "#/components/parameters/RequestId" }]
+    post:
+      tags: [Owner]
+      summary: Reject a held request
+      responses:
+        "200": { description: Rejected, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentRequest" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Not held any more (not_held) }
+        "410": { description: The hold expired (hold_expired) }
+
+  /v1/audit/verify:
+    get:
+      tags: [Owner]
+      summary: Check the hash chain of the audit log
+      responses:
+        "200":
+          description: The result. Store `head` somewhere else now and then, so a rewrite of the whole chain would show.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { type: object, properties: { ok: { const: true }, entries: { type: integer }, head: { type: string } } }
+                  - { type: object, properties: { ok: { const: false }, entries: { type: integer }, broken_at: { type: integer, description: The first entry that no longer fits } } }
+
+  /approve/{token}:
+    parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [Public]
+      summary: The approver's page from their link. Shows the request; changes nothing.
+      description: Link previews in SMS and chat apps fetch links automatically, so opening a link never approves.
+      security: []
+      responses:
+        "200": { description: HTML page, content: { text/html: {} } }
+        "404": { description: Link not valid, content: { text/html: {} } }
+    post:
+      tags: [Public]
+      summary: The page's Approve or Reject button. Each link works once.
+      security: []
+      requestBody:
+        required: true
+        content: { application/x-www-form-urlencoded: { schema: { type: object, required: [action], properties: { action: { type: string, enum: [approve, reject] } } } } }
+      responses:
+        "200": { description: Done, content: { text/html: {} } }
+        "409": { description: Already answered, content: { text/html: {} } }
+        "410": { description: "Too late: the hold expired", content: { text/html: {} } }
+
+  /webhooks/momo:
+    post:
+      tags: [Public]
+      summary: Payout results from MoMo One-API
+      description: Checked against X-Signature (sha256=hex HMAC-SHA256 of the raw body with MOMO_WEBHOOK_SECRET). The body is only used to find the payout; its status is then fetched from MoMo One-API.
+      security: []
+      parameters: [{ name: X-Signature, in: header, required: true, schema: { type: string, example: "sha256=8f2a..." } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        "200": { description: Handled, content: { application/json: { schema: { type: object, properties: { updated: { type: boolean } } } } } }
+        "401": { description: Signature doesn't match }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, description: "An owner key (OWNER_KEYS) or an agent key (sg_agent_...)" }
+  parameters:
+    AgentId: { name: id, in: path, required: true, schema: { type: string, example: agt_TwHWEQH08SGaVXFi } }
+    RequestId: { name: id, in: path, required: true, schema: { type: string, example: pr_Lifkkt4fSRESIlOL } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, maxLength: 128, example: invoice-88 }, description: Tie it to the thing being paid. The same key always gets the same answer. }
+  responses:
+    BadRequest: { description: Invalid input, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Unauthorized: { description: Missing or invalid key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Forbidden: { description: "Wrong kind of key (owner_only, agent_only)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    NotFound: { description: "Not found, or not yours", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: per_day_max }
+            message: { type: string }
+            issues: { type: array, items: { type: object, properties: { path: { type: string }, message: { type: string } } } }
+    Currency: { type: string, enum: [GHS, KES, NGN, UGX, XOF] }
+    Status:
+      type: string
+      enum: [allowed, held, approved, rejected, expired, cancelled, denied]
+      description: allowed and denied come from the policy; held ends as approved, rejected, expired (nobody answered) or cancelled (agent revoked).
+    Agent:
+      type: object
+      properties:
+        id: { type: string }
+        owner: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+    Limits:
+      type: object
+      additionalProperties: false
+      required: [per_payment_max, per_day_max, per_month_max, payments_per_hour_max]
+      properties:
+        per_payment_max: { type: integer, minimum: 1 }
+        per_day_max: { type: integer, minimum: 1 }
+        per_month_max: { type: integer, minimum: 1 }
+        payments_per_hour_max: { type: integer, minimum: 1 }
+    Policy:
+      type: object
+      additionalProperties: false
+      required: [currency, timezone, limits, recipients]
+      description: Unknown fields are rejected. A policy with a rule that can hold must name approvers.
+      properties:
+        currency: { $ref: "#/components/schemas/Currency" }
+        timezone: { type: string, description: "IANA time zone for today, this month and working hours", example: Africa/Accra }
+        limits: { $ref: "#/components/schemas/Limits" }
+        recipients:
+          type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode: { type: string, enum: [allow_list, any] }
+            list: { type: array, items: { type: string }, maxItems: 500 }
+            new_recipient: { type: string, enum: [hold, deny], default: hold }
+        approval:
+          type: object
+          additionalProperties: false
+          required: [hold_above, approvers]
+          properties:
+            hold_above: { type: integer, minimum: 0, description: Payments above this need a person }
+            approvers: { type: array, items: { type: string }, minItems: 1, maxItems: 10 }
+            channel: { type: string, enum: [dashboard, sms, whatsapp], default: dashboard }
+            expires_after_minutes: { type: integer, minimum: 1, maximum: 1440, default: 30 }
+        hours:
+          type: object
+          additionalProperties: false
+          required: [allow]
+          properties:
+            allow: { type: string, example: "Mon-Sat 07:00-19:00", description: Same-day window; the end is exclusive }
+            outside: { type: string, enum: [hold, deny], default: hold }
+      example:
+        currency: GHS
+        timezone: Africa/Accra
+        limits: { per_payment_max: 50000, per_day_max: 200000, per_month_max: 1500000, payments_per_hour_max: 10 }
+        recipients: { mode: allow_list, list: ["supplier:kofi-hardware", "supplier:ama-printing"], new_recipient: hold }
+        approval: { hold_above: 20000, approvers: ["+233534884648"], channel: sms, expires_after_minutes: 30 }
+        hours: { allow: "Mon-Sat 07:00-19:00", outside: hold }
+    PolicyVersion:
+      type: object
+      properties:
+        version: { type: integer }
+        policy: { $ref: "#/components/schemas/Policy" }
+    Usage:
+      type: object
+      properties:
+        day: { type: integer }
+        month: { type: integer }
+        lastHourCount: { type: integer }
+    RecipientInput:
+      type: object
+      additionalProperties: false
+      required: [name, phone, network]
+      properties:
+        name: { type: string, maxLength: 100 }
+        phone: { type: string, example: "024 123 4567" }
+        network: { type: string, enum: [mtn, telecel, airteltigo, mpesa] }
+    Recipient:
+      allOf:
+        - { type: object, properties: { id: { type: string } } }
+        - { $ref: "#/components/schemas/RecipientInput" }
+    PaymentRequestInput:
+      type: object
+      additionalProperties: false
+      required: [amount, currency, recipient, reference]
+      properties:
+        amount: { type: integer, minimum: 1, description: Minor units }
+        currency: { $ref: "#/components/schemas/Currency" }
+        recipient: { type: string, description: An id from the owner's recipient directory }
+        reference: { type: string, maxLength: 140 }
+        reason: { type: string, maxLength: 1000, description: Shown to the approver. Never used to decide. }
+    PaymentRequest:
+      type: object
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        status: { $ref: "#/components/schemas/Status" }
+        amount: { type: integer }
+        currency: { $ref: "#/components/schemas/Currency" }
+        recipient: { type: string }
+        reference: { type: string }
+        reason: { type: [string, "null"] }
+        decision:
+          type: object
+          properties:
+            result: { type: string, enum: [allow, hold, deny] }
+            rule: { type: string, enum: [no_policy, currency, per_payment_max, per_day_max, per_month_max, payments_per_hour_max, new_recipient, outside_hours, hold_above, within_policy] }
+            message: { type: string }
+            detail: { type: object }
+        policy_version: { type: [integer, "null"] }
+        approval: { type: object, properties: { expires_at: { type: string, format: date-time } } }
+        resolved: { type: object, properties: { at: { type: string, format: date-time }, by: { type: string, example: "approver:+233534884648" } } }
+        payout:
+          type: object
+          properties:
+            id: { type: [string, "null"] }
+            status: { type: string, enum: [queued, pending, action_required, succeeded, failed, reversed] }
+            failure: { type: [object, "null"], properties: { code: { type: string }, message: { type: string } } }
+        created_at: { type: string, format: date-time }

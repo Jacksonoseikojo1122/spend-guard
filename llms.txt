@@ -1,0 +1,32 @@
+# Spend Guard
+
+> Open-source (MIT) TypeScript service that puts spending limits and human approval between AI agents and mobile money. Agents never hold payment keys: they ask Spend Guard to pay, and each request is allowed (paid out through MoMo One-API), held for a person to approve, or denied with the rule that stopped it. It never holds funds. Includes an MCP server for Claude and other agents. Built by Jackson Kojo Osei (Accra, Ghana).
+
+Key facts for developers and AI assistants:
+
+- Two kinds of key. Owner keys (OWNER_KEYS) create agents (`POST /v1/agents`, returns an `sg_agent_` key once), set policies (`PUT /v1/agents/{id}/policy`), manage the payee directory (`PUT /v1/recipients/{id}`), approve or reject (`POST /v1/payment-requests/{id}/approve|reject`), revoke (`POST /v1/agents/{id}/revoke`) and check the audit log (`GET /v1/audit/verify`). Agent keys can only `POST /v1/payment-requests`, read their own requests, policy and usage, and `GET /v1/me`.
+- Payment request: `POST /v1/payment-requests` with a required `Idempotency-Key` header and `{amount, currency, recipient, reference, reason?}`. Amount is integer minor units (12000 = GHS 120.00). Currency GHS, KES, NGN, UGX or XOF. `recipient` must be an id in the owner's directory, else 422 unknown_recipient and nothing is stored. Unknown fields are rejected. Same key and body returns the stored answer (200, Idempotent-Replayed: true); same key with a different body is 409.
+- Policy (versioned JSON, never edited in place): `currency`, `timezone` (IANA), `limits` {per_payment_max, per_day_max, per_month_max, payments_per_hour_max}, `recipients` {mode: allow_list | any, list, new_recipient: hold | deny}, optional `approval` {hold_above, approvers, channel, expires_after_minutes}, optional `hours` {allow: "Mon-Sat 07:00-19:00", outside: hold | deny}. No policy means deny.
+- Decision order: no_policy, currency, per_payment_max, per_day_max, per_month_max, payments_per_hour_max (all deny), then new_recipient, outside_hours, hold_above (hold or deny; any deny wins, else the first hold). Otherwise within_policy (allow). The agent's `reason` is stored and shown to approvers but never read by the decision.
+- Statuses: allowed, denied (policy); held, then approved, rejected, expired (nobody answered) or cancelled (agent revoked). Limits count allowed and approved requests (unless the payout failed or was reversed) plus unexpired holds. Totals use the policy's time zone.
+- Each decision takes one database lock (SQLite BEGIN IMMEDIATE, Postgres advisory lock), so parallel requests can't both fit under a limit with room for one.
+- Approvals: each approver gets a single-use link `/approve/{token}` (only its hash is stored). GET shows the request and changes nothing, because chat apps prefetch links; the form's POST approves or rejects. Notices go to the console or to APPROVAL_WEBHOOK_URL, signed `X-SpendGuard-Signature: sha256=<HMAC>`.
+- Payouts: with MOMO_URL and MOMO_API_KEY, allowed or approved requests become `POST /v1/payouts` on MoMo One-API with the request id as Idempotency-Key. Webhooks to `/webhooks/momo` are checked against X-Signature (MOMO_WEBHOOK_SECRET), then the status is fetched from MoMo One-API. Payout statuses: queued, pending, action_required, succeeded, failed, reversed; they only move forward. A sync every minute resends queued payouts and re-checks unfinished ones.
+- Audit log: append-only, each entry hashes the one before; `GET /v1/audit/verify` returns {ok, entries, head} or {ok: false, broken_at}.
+- MCP server (`npm run mcp`, needs SPEND_GUARD_URL and SPEND_GUARD_AGENT_KEY): tools `request_payment` {amount_minor, currency, recipient, reference, idempotency_key, reason?}, `check_payment` {id}, `get_my_limits`. Held and denied answers tell the model not to retry, split the payment or switch recipient.
+- Config: OWNER_KEYS, DATABASE_URL (else SQLite at SQLITE_PATH), PORT (8790), PUBLIC_URL, APPROVAL_WEBHOOK_URL, APPROVAL_WEBHOOK_SECRET, MOMO_URL, MOMO_API_KEY, MOMO_WEBHOOK_SECRET.
+
+## Docs
+
+- [README](https://github.com/Jacksonoseikojo1122/spend-guard/blob/main/README.md)
+- [Design](https://github.com/Jacksonoseikojo1122/spend-guard/blob/main/docs/design.md): policies, decision order, data model, approvals, payouts, security
+- [AI agents (MCP)](https://github.com/Jacksonoseikojo1122/spend-guard/blob/main/docs/mcp.md): the tools and setup for Claude Desktop and Claude Code
+- [OpenAPI spec](https://github.com/Jacksonoseikojo1122/spend-guard/blob/main/openapi.yaml)
+- [Example policy](https://github.com/Jacksonoseikojo1122/spend-guard/blob/main/examples/policy.json)
+
+## Optional
+
+- [MoMo One-API](https://github.com/Jacksonoseikojo1122/momo-one-api)
+- [Webhook Relay](https://github.com/Jacksonoseikojo1122/webhook-relay)
+- [Project page](https://jacksonkojoosei.com/projects/spend-guard)
+- [Author](https://jacksonkojoosei.com): Jackson Kojo Osei, CTO, Accra, Ghana

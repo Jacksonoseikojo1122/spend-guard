@@ -12,9 +12,9 @@ import { ApiError, sha256, STATUSES, type Agent, type Guard, type Status } from 
 type Caller = { kind: "owner"; owner: string } | { kind: "agent"; agent: Agent };
 type Env = { Variables: { caller: Caller } };
 
-export type AppOptions = { guard: Guard; ownerKeys: string[] };
+export type AppOptions = { guard: Guard; ownerKeys: string[]; files?: { openapi?: string; llms?: string } };
 
-export function createApp({ guard, ownerKeys }: AppOptions) {
+export function createApp({ guard, ownerKeys, files }: AppOptions) {
   const app = new Hono<Env>();
 
   app.onError((err, c) => {
@@ -28,6 +28,8 @@ export function createApp({ guard, ownerKeys }: AppOptions) {
   app.use("*", bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.json({ error: { code: "too_large", message: "Body is larger than 64 KB." } }, 413) }));
 
   app.get("/health", (c) => c.json({ ok: true }));
+  if (files?.openapi) app.get("/openapi.yaml", (c) => c.body(files.openapi!, 200, { "content-type": "application/yaml" }));
+  if (files?.llms) app.get("/llms.txt", (c) => c.text(files.llms!));
 
   // --- MoMo One-API webhook (signed; no API key) --------------------------------------------
   app.post("/webhooks/momo", async (c) => c.json(await guard.handleMomoWebhook(await c.req.text(), c.req.header("x-signature"))));

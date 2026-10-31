@@ -1,6 +1,6 @@
 {
   "name": "spend-guard",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Spending limits and human approval for AI agents that move money on mobile money. Agents never see the provider keys, and it never holds funds.",
   "type": "module",
   "scripts": {

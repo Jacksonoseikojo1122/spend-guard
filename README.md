@@ -2,7 +2,7 @@
 
 Spending limits and human approval for AI agents that move money on mobile money.
 
-> **Status: in progress.** Built and tested: the policy format, the decision engine, the HTTP API with idempotency, SQLite and Postgres storage, the tamper-evident audit log, approvals, a recipient directory and payouts through MoMo One-API (run end to end against its sandbox, not yet against a real provider), and an MCP server for AI agents. See the [design](docs/design.md).
+> **Status: pilot (v0.1).** Built and tested: the policy format, the decision engine, the HTTP API with idempotency, SQLite and Postgres storage, the tamper-evident audit log, approvals, a recipient directory and payouts through MoMo One-API (run end to end against its sandbox, not yet against a real provider), an MCP server for AI agents, an OpenAPI spec and llms.txt. v0.1 is a pilot: use it with a sandbox until you have run it against your own provider. See the [design](docs/design.md).
 
 AI agents are starting to pay suppliers, refund customers and send mobile money. Usually the agent holds the provider's secret key and can send any amount to anyone. One prompt injection, bug or retry loop, and the money is gone, with no record of why.
 
@@ -128,6 +128,8 @@ Every step, from the decision to the approval to each payout result, is in the a
 | --- | --- |
 | [Design](docs/design.md) | The problem, policies, decision order, API, data model, security, tests and build order |
 | [AI agents (MCP)](docs/mcp.md) | The three tools, setup for Claude Desktop, Claude Code and your own agent |
+| [OpenAPI spec](openapi.yaml) | Every endpoint. A test fails if the app and the spec ever disagree. Also served at `/openapi.yaml` |
+| [llms.txt](llms.txt) | A summary for AI assistants helping you integrate. Also served at `/llms.txt` |
 | [Example policy](examples/policy.json) | A policy you can copy |
 
 ## Related projects
@@ -138,7 +140,7 @@ Every step, from the decision to the approval to each payout result, is in the a
 ## Author
 
 Built by **[Jackson Kojo Osei](https://jacksonkojoosei.com)**, CTO in Accra, Ghana.
-[LinkedIn](https://www.linkedin.com/in/jackson-kojo-osei-740846189) · [All projects](https://jacksonkojoosei.com/projects)
+[LinkedIn](https://www.linkedin.com/in/jackson-kojo-osei-740846189) · [Project page](https://jacksonkojoosei.com/projects/spend-guard) · [All projects](https://jacksonkojoosei.com/projects)
 
 ## License
 
