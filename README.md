@@ -2,7 +2,7 @@
 
 Spending limits and human approval for AI agents that move money on mobile money.
 
-> **Status: in progress.** Built and tested: the policy format, the decision engine, the HTTP API with idempotency, SQLite and Postgres storage, the tamper-evident audit log, approvals, a recipient directory and payouts through MoMo One-API (run end to end against its sandbox, not yet against a real provider). Next: the MCP server. See the [design](docs/design.md).
+> **Status: in progress.** Built and tested: the policy format, the decision engine, the HTTP API with idempotency, SQLite and Postgres storage, the tamper-evident audit log, approvals, a recipient directory and payouts through MoMo One-API (run end to end against its sandbox, not yet against a real provider), and an MCP server for AI agents. See the [design](docs/design.md).
 
 AI agents are starting to pay suppliers, refund customers and send mobile money. Usually the agent holds the provider's secret key and can send any amount to anyone. One prompt injection, bug or retry loop, and the money is gone, with no record of why.
 
@@ -24,7 +24,7 @@ Spend Guard sits between your agents and your payment provider. The agent never 
 - **The agent's words don't count.** Amount, currency and recipient are typed and validated. The agent's "reason" is shown to the approver but never used to decide.
 - **No double payments.** `Idempotency-Key` is required. The same key always gets the same answer.
 - **An audit log that shows tampering.** Every request, decision, approval and result is recorded, with the policy version and the rule that decided it.
-- **An MCP server,** so Claude and other agents can call `request_payment`, `check_payment` and `get_my_limits` directly.
+- **An MCP server,** so Claude and other agents can call `request_payment`, `check_payment` and `get_my_limits` with their own key. Held and denied answers tell the model why, and not to retry, split the payment or switch recipient. See [Using Spend Guard from an AI agent](docs/mcp.md).
 
 ## Quick start
 
@@ -127,6 +127,7 @@ Every step, from the decision to the approval to each payout result, is in the a
 | | |
 | --- | --- |
 | [Design](docs/design.md) | The problem, policies, decision order, API, data model, security, tests and build order |
+| [AI agents (MCP)](docs/mcp.md) | The three tools, setup for Claude Desktop, Claude Code and your own agent |
 | [Example policy](examples/policy.json) | A policy you can copy |
 
 ## Related projects

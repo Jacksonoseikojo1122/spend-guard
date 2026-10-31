@@ -1,6 +1,6 @@
 # Spend Guard: design
 
-Status: steps 1 to 4 built (decision engine; API, storage and audit log; approvals; payouts through MoMo One-API). Written 31 Oct 2026.
+Status: steps 1 to 5 built (decision engine; API, storage and audit log; approvals; payouts through MoMo One-API; MCP server). Written 31 Oct 2026.
 
 ## The problem
 
@@ -181,7 +181,7 @@ TypeScript, Hono, Zod, Postgres (SQLite locally), Vitest, Docker. MCP server wit
 2. HTTP API, idempotency, Postgres, audit log with hash chain. (Done.)
 3. Holds and approvals: approval links and page, expiry, owner API, signed webhook notices. (Done.) A built-in SMS adapter comes later.
 4. MoMo One-API integration in sandbox mode, end to end. (Done: recipient directory, payouts, webhooks, sync.)
-5. MCP server, plus an example with Claude: a procurement agent paying two suppliers, one payment held for approval.
+5. MCP server, plus an example with Claude: a procurement agent paying two suppliers, one payment held for approval. (Done: MCP server, stdio client example, setup guide in docs/mcp.md. A live run inside Claude Desktop is still to do.)
 6. Docs, OpenAPI, llms.txt, demo screenshots, project page on jacksonkojoosei.com.
 
 ## Not in the first version

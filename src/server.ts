@@ -129,6 +129,13 @@ export function createApp({ guard, ownerKeys }: AppOptions) {
   });
 
   // --- Agent routes -----------------------------------------------------------------------
+  /** Which agent this key belongs to; the MCP server uses it to find its own limits. */
+  app.get("/v1/me", (c) => {
+    const caller = c.get("caller");
+    if (caller.kind !== "agent") throw new ApiError(403, "agent_only", "Only an agent key has an identity here.");
+    const { id, name, created_at } = caller.agent;
+    return c.json({ id, name, created_at });
+  });
   app.post("/v1/payment-requests", async (c) => {
     const caller = c.get("caller");
     if (caller.kind !== "agent") throw new ApiError(403, "agent_only", "Payment requests are made with an agent key, so every request belongs to one agent and its policy.");

@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "mcp": "tsx src/mcp-stdio.ts"
   },
   "repository": {
     "type": "git",
@@ -21,6 +22,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "hono": "^4.13.14",
     "pg": "^8.23.1",
     "tsx": "^4.23.15",
