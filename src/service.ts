@@ -204,7 +204,8 @@ export class Guard {
       const current = await latestPolicy(q, agent.id);
       const policy = current?.policy;
       const { day, month } = localDate(now, policy?.timezone ?? "UTC");
-      const usage = await usageFor(q, agent.id, day, month, now.getTime());
+      const combine = policy?.approval?.combine_window_minutes ?? 0;
+      const usage = await usageFor(q, agent.id, day, month, now.getTime(), combine > 0 ? { recipient: body.recipient, windowMs: combine * 60_000 } : undefined);
       const decision = decide({ policy, request: body, usage, now });
 
       const status: Status = decision.result === "allow" ? "allowed" : decision.result === "hold" ? "held" : "denied";
@@ -482,12 +483,23 @@ async function latestPolicy(q: Query, agentId: string): Promise<{ version: numbe
  * haven't expired. An expired hold can never be approved, so it stops reserving room, and a
  * payout that failed or was reversed moved no money, so it frees its room too.
  */
-async function usageFor(q: Query, agentId: string, day: string, month: string, nowMs: number): Promise<Usage> {
+async function usageFor(
+  q: Query, agentId: string, day: string, month: string, nowMs: number,
+  toRecipient?: { recipient: string; windowMs: number },
+): Promise<Usage> {
   const counted = `((status IN ('allowed', 'approved') AND COALESCE(payout_status, '') NOT IN ('failed', 'reversed')) OR (status = 'held' AND hold_expires_ms > $3))`;
   const [d] = await q(`SELECT COALESCE(SUM(amount), 0) AS total FROM payment_requests WHERE agent_id = $1 AND local_day = $2 AND ${counted}`, [agentId, day, nowMs]);
   const [m] = await q(`SELECT COALESCE(SUM(amount), 0) AS total FROM payment_requests WHERE agent_id = $1 AND local_month = $2 AND ${counted}`, [agentId, month, nowMs]);
   const [h] = await q(`SELECT COUNT(*) AS n FROM payment_requests WHERE agent_id = $1 AND created_ms > $2 AND ${counted}`, [agentId, nowMs - 3_600_000, nowMs]);
-  return { day: Number(d?.total ?? 0), month: Number(m?.total ?? 0), lastHourCount: Number(h?.n ?? 0) };
+  const usage: Usage = { day: Number(d?.total ?? 0), month: Number(m?.total ?? 0), lastHourCount: Number(h?.n ?? 0) };
+  if (toRecipient) {
+    const [r] = await q(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM payment_requests WHERE agent_id = $1 AND created_ms > $2 AND ${counted} AND recipient = $4`,
+      [agentId, nowMs - toRecipient.windowMs, nowMs, toRecipient.recipient],
+    );
+    usage.recentToRecipient = Number(r?.total ?? 0);
+  }
+  return usage;
 }
 
 const toAgent = (r: Row): Agent => ({

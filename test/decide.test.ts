@@ -122,6 +122,19 @@ describe("decisions", () => {
     expect(run({ r: req({ amount: 20_000 }) }).result).toBe("allow");
   });
 
+  it("adds recent payments to the same recipient before comparing with the approval threshold", () => {
+    // 15,000 already went to Kofi in the window, so another 6,000 makes 21,000: over 20,000.
+    expect(run({ r: req({ amount: 6_000 }), u: { recentToRecipient: 15_000 } })).toMatchObject({
+      result: "hold",
+      rule: "hold_above",
+      detail: { amount: 6_000, recent_to_recipient: 15_000, combined: 21_000, threshold: 20_000, window_minutes: 60 },
+    });
+    expect(run({ r: req({ amount: 5_000 }), u: { recentToRecipient: 15_000 } }).result).toBe("allow");
+    // Turned off with a window of 0.
+    const off = policy({ approval: { ...base.approval, combine_window_minutes: 0 } });
+    expect(run({ p: off, r: req({ amount: 6_000 }), u: { recentToRecipient: 15_000 } }).result).toBe("allow");
+  });
+
   it("reports the first hold, but a later deny still wins over an earlier hold", () => {
     expect(run({ r: req({ recipient: "new-person", amount: 30_000 }), now: TUESDAY_9PM }).rule).toBe("new_recipient");
     const nightDeny = policy({ hours: { ...base.hours, outside: "deny" } });

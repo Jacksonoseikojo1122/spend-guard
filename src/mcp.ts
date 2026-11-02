@@ -171,6 +171,9 @@ export function createMcpServer(api: SpendGuardApi): McpServer {
             ? `Allowed recipients: ${p.recipients.list.join(", ") || "none"}. Others are ${p.recipients.new_recipient === "hold" ? "held for approval" : "denied"}.`
             : "Any recipient in the owner's directory.",
           p.approval ? `Payments over ${m(p.approval.hold_above)} need a person to approve them (they have ${p.approval.expires_after_minutes} minutes).` : "No approval step.",
+          p.approval && (p.approval.combine_window_minutes ?? 60) > 0
+            ? `Payments to the same recipient within ${p.approval.combine_window_minutes ?? 60} minutes are added together for that check, so splitting a payment doesn't avoid approval.`
+            : "",
           p.hours ? `Automatic payments only during ${p.hours.allow}; outside that they're ${p.hours.outside === "hold" ? "held" : "denied"}.` : "",
         ].filter(Boolean);
         return text(lines.join("\n"), { agent: me, policy: p, policy_version: policy.version, usage, day, month });

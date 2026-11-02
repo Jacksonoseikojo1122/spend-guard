@@ -13,6 +13,11 @@ export type Usage = {
   month: number;
   /** Allowed plus held payment requests in the last 60 minutes. */
   lastHourCount: number;
+  /**
+   * Allowed plus held amounts to this request's recipient within the policy's
+   * approval.combine_window_minutes. Only known when deciding a request.
+   */
+  recentToRecipient?: number;
 };
 
 export type DecisionInput = {
@@ -100,9 +105,21 @@ export function decide({ policy, request, usage, now }: DecisionInput): Decision
     }
   }
 
-  // 9. Size that needs a person.
-  if (policy.approval && amount > policy.approval.hold_above)
-    holds.push({ result: "hold", rule: "hold_above", message: "Payments of this size need a person to approve them.", detail: { amount, threshold: policy.approval.hold_above } });
+  // 9. Size that needs a person. Recent payments to the same recipient count too, otherwise an
+  // agent could split one payment into pieces that each sit just under the threshold.
+  if (policy.approval) {
+    const { hold_above, combine_window_minutes } = policy.approval;
+    const recent = combine_window_minutes > 0 ? (usage.recentToRecipient ?? 0) : 0;
+    if (amount > hold_above)
+      holds.push({ result: "hold", rule: "hold_above", message: "Payments of this size need a person to approve them.", detail: { amount, threshold: hold_above } });
+    else if (amount + recent > hold_above)
+      holds.push({
+        result: "hold",
+        rule: "hold_above",
+        message: `Together with other payments to this recipient in the last ${combine_window_minutes} minutes, this needs a person to approve it.`,
+        detail: { amount, recent_to_recipient: recent, combined: amount + recent, threshold: hold_above, window_minutes: combine_window_minutes },
+      });
+  }
 
   if (holds.length) return holds[0]!;
 

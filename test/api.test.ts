@@ -11,7 +11,8 @@ const policy = (overrides: object = {}) => ({
   timezone: "Africa/Accra",
   limits: { per_payment_max: 50_000, per_day_max: 100_000, per_month_max: 1_000_000, payments_per_hour_max: 100 },
   recipients: { mode: "allow_list", list: ["supplier:kofi", "supplier:ama"], new_recipient: "hold" },
-  approval: { hold_above: 20_000, approvers: ["+233534884648"], expires_after_minutes: 30 },
+  // Most tests pay the same supplier repeatedly, so combining is off here and switched on where it's tested.
+  approval: { hold_above: 20_000, approvers: ["+233534884648"], expires_after_minutes: 30, combine_window_minutes: 0 },
   ...overrides,
 });
 
@@ -148,6 +149,22 @@ describe.each(backends)("API on %s", (_name, makeDb) => {
     expect(usage.json).toMatchObject({ usage: { day: 100_000, lastHourCount: 3 }, day: "2026-11-03", timezone: "Africa/Accra" });
   });
 
+  it("holds a payment split into pieces under the approval threshold", async () => {
+    const { newAgent, pay, setNow } = await setup();
+    const agent = await newAgent(policy({ approval: { hold_above: 20_000, approvers: ["+233534884648"], expires_after_minutes: 30, combine_window_minutes: 60 } }));
+    // 30,000 to Kofi would need approval, so the agent tries 15,000 twice.
+    expect((await pay(agent.key, { amount: 15_000 })).json).toMatchObject({ status: "allowed" });
+    expect((await pay(agent.key, { amount: 15_000 })).json).toMatchObject({
+      status: "held",
+      decision: { rule: "hold_above", detail: { recent_to_recipient: 15_000, combined: 30_000, threshold: 20_000, window_minutes: 60 } },
+    });
+    // Another supplier isn't affected.
+    expect((await pay(agent.key, { amount: 15_000, recipient: "supplier:ama" })).json).toMatchObject({ status: "allowed" });
+    // Once the window has passed, Kofi's earlier payments no longer combine (the held one has expired too).
+    setNow(new Date("2026-11-03T11:01:00Z"));
+    expect((await pay(agent.key, { amount: 15_000 })).json).toMatchObject({ status: "allowed" });
+  });
+
   it("stops counting a hold once it expires", async () => {
     const { newAgent, pay, setNow } = await setup();
     const agent = await newAgent();
@@ -196,7 +213,7 @@ describe.each(backends)("API on %s", (_name, makeDb) => {
     const agent = await newAgent();
     const first = (await pay(agent.key, { amount: 30_000 })).json;
     expect(first).toMatchObject({ status: "held", policy_version: 1 });
-    const v2 = await call("PUT", `/v1/agents/${agent.id}/policy`, OWNER_KEY, policy({ approval: { hold_above: 40_000, approvers: ["+233534884648"] } }));
+    const v2 = await call("PUT", `/v1/agents/${agent.id}/policy`, OWNER_KEY, policy({ approval: { hold_above: 40_000, approvers: ["+233534884648"], combine_window_minutes: 0 } }));
     expect(v2.json.version).toBe(2);
     expect((await pay(agent.key, { amount: 30_000 })).json).toMatchObject({ status: "allowed", policy_version: 2 });
     expect((await call("GET", `/v1/payment-requests/${first.id}`, OWNER_KEY)).json).toMatchObject({ status: "held", policy_version: 1 });

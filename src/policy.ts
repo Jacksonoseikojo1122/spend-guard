@@ -68,6 +68,10 @@ export const PolicySchema = z
         approvers: z.array(z.string().min(3)).min(1).max(10),
         channel: z.enum(["dashboard", "sms", "whatsapp"]).default("dashboard"),
         expires_after_minutes: z.number().int().min(1).max(24 * 60).default(30),
+        // Payments to the same recipient within this many minutes are added together before
+        // comparing with hold_above, so one payment can't be split into pieces that each sit
+        // just under the threshold. 0 turns this off.
+        combine_window_minutes: z.number().int().min(0).max(24 * 60).default(60),
       })
       .strict()
       .optional(),

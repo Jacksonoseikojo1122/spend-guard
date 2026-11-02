@@ -95,7 +95,7 @@ The decision engine (`src/decide.ts`, a pure function) then runs:
 6. Too many requests in the last hour: deny.
 7. Recipient not on the allow list: follow `new_recipient` (hold or deny).
 8. Outside the time window: follow `outside` (hold or deny).
-9. Amount above `hold_above`: hold.
+9. Amount above `hold_above`: hold. So is a smaller amount that, added to what this agent already sent (or has waiting) to the same recipient in the last `combine_window_minutes` (default 60, 0 = off), comes to more than `hold_above`. Without this an agent could split one payment into pieces that each sit just under the threshold.
 10. Otherwise allow.
 
 Steps 1–6 deny straight away. Steps 7–9 are all checked: if any says deny, that wins; otherwise the first hold is reported. The window end is exclusive (19:00 is outside "07:00-19:00").

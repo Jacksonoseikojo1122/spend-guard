@@ -305,6 +305,7 @@ components:
             approvers: { type: array, items: { type: string }, minItems: 1, maxItems: 10 }
             channel: { type: string, enum: [dashboard, sms, whatsapp], default: dashboard }
             expires_after_minutes: { type: integer, minimum: 1, maximum: 1440, default: 30 }
+            combine_window_minutes: { type: integer, minimum: 0, maximum: 1440, default: 60, description: Payments to the same recipient within this many minutes are added together before comparing with hold_above. 0 turns it off. }
         hours:
           type: object
           additionalProperties: false
@@ -330,6 +331,7 @@ components:
         day: { type: integer }
         month: { type: integer }
         lastHourCount: { type: integer }
+        recentToRecipient: { type: integer, description: Only present on a decision. Allowed and held amounts to the same recipient within approval.combine_window_minutes. }
     RecipientInput:
       type: object
       additionalProperties: false

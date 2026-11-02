@@ -52,7 +52,8 @@ const policy = {
   timezone: "Africa/Accra",
   limits: { per_payment_max: 50_000, per_day_max: 100_000, per_month_max: 1_000_000, payments_per_hour_max: 100 },
   recipients: { mode: "allow_list", list: ["supplier:kofi"], new_recipient: "hold" },
-  approval: { hold_above: 40_000, approvers: ["+233534884648"], expires_after_minutes: 30 },
+  // These tests pay the same supplier repeatedly; combining is covered in api.test.ts and decide.test.ts.
+  approval: { hold_above: 40_000, approvers: ["+233534884648"], expires_after_minutes: 30, combine_window_minutes: 0 },
 };
 
 const backends: [string, () => Promise<Db>][] = [["sqlite", async () => sqliteDb()]];
