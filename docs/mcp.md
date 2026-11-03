@@ -38,6 +38,8 @@ You can run the same check yourself with [`examples/mcp-client.ts`](../examples/
 1. Run Spend Guard and create an agent with a policy (see the [README](../README.md#quick-start)). Keep the `sg_agent_...` key it gives you.
 2. Point your agent host at `src/mcp-stdio.ts` with two settings: `SPEND_GUARD_URL` and `SPEND_GUARD_AGENT_KEY`.
 
+Without those two settings the server still starts and lists its tools, but every call answers that it isn't set up, so nothing can be paid. The repo's `Dockerfile` runs this server: `docker build -t spend-guard . && docker run -i -e SPEND_GUARD_URL=... -e SPEND_GUARD_AGENT_KEY=... spend-guard`.
+
 ### Claude Desktop
 
 In `claude_desktop_config.json` (Settings → Developer → Edit config):
